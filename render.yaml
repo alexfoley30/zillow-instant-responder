@@ -1,0 +1,21 @@
+# Render.com deploy config — free/cheap always-on host for the instant responder.
+# Render reads this on deploy. Pure Python stdlib, no build step, no dependencies.
+services:
+  - type: web
+    name: zillow-instant-responder
+    runtime: python
+    plan: starter            # ~$7/mo always-on; "free" plan sleeps after inactivity (bad for instant)
+    buildCommand: ""         # nothing to build, stdlib only
+    startCommand: python responder.py
+    healthCheckPath: /
+    envVars:
+      - key: COMPOSIO_API_KEY
+        sync: false          # set in dashboard, never commit
+      - key: COMPOSIO_CONNECTED_ACCOUNT_ID
+        sync: false
+      - key: AWAITING_RENTER_LABEL_ID
+        sync: false
+      - key: HANDLED_LABEL_ID
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
