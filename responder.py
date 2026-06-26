@@ -38,6 +38,7 @@ log = logging.getLogger("zillow-instant")
 
 COMPOSIO_API_KEY = os.environ.get("COMPOSIO_API_KEY", "")
 CONNECTED_ACCOUNT_ID = os.environ.get("COMPOSIO_CONNECTED_ACCOUNT_ID", "")
+COMPOSIO_USER_ID = os.environ.get("COMPOSIO_USER_ID", "")
 AWAITING_LABEL = os.environ.get("AWAITING_RENTER_LABEL_ID", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -99,6 +100,7 @@ def composio_execute(tool_slug: str, arguments: dict) -> dict:
     url = f"{COMPOSIO_BASE}/tools/execute/{tool_slug}"
     body = json.dumps({
         "connected_account_id": CONNECTED_ACCOUNT_ID,
+        "user_id": COMPOSIO_USER_ID,
         "arguments": arguments,
     }).encode()
     req = urllib.request.Request(
