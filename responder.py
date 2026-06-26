@@ -96,13 +96,16 @@ def parse_subject(subject: str):
 
 
 def composio_execute(tool_slug: str, arguments: dict) -> dict:
-    """Call a Composio tool via the v3 execute endpoint."""
+    """Call a Composio tool via the v3 execute endpoint.
+    Only send connected_account_id if it's a real account id (ca_...). A misconfigured
+    env (e.g. the API key pasted in by mistake) would otherwise cause a 400
+    ConnectedAccountNotFound; falling back to user_id lets Composio resolve the
+    user's default Gmail connection."""
     url = f"{COMPOSIO_BASE}/tools/execute/{tool_slug}"
-    body = json.dumps({
-        "connected_account_id": CONNECTED_ACCOUNT_ID,
-        "user_id": COMPOSIO_USER_ID,
-        "arguments": arguments,
-    }).encode()
+    payload = {"user_id": COMPOSIO_USER_ID, "arguments": arguments}
+    if CONNECTED_ACCOUNT_ID.startswith("ca_"):
+        payload["connected_account_id"] = CONNECTED_ACCOUNT_ID
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(
         url, data=body, method="POST",
         headers={"x-api-key": COMPOSIO_API_KEY, "Content-Type": "application/json"},
