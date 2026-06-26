@@ -118,8 +118,24 @@ def composio_execute(tool_slug: str, arguments: dict) -> dict:
         raise
 
 
+RELAY_RE = re.compile(r"<([^>]+@[^>]+)>")
+
+
+def relay_from_sender(sender: str) -> str:
+    """Extract the convo.zillow.com relay address from a 'Name <addr>' sender string."""
+    if not sender:
+        return ""
+    m = RELAY_RE.search(sender)
+    if m:
+        return m.group(1).strip()
+    s = sender.strip()
+    return s if "@" in s else ""
+
+
 def already_handled(thread_id: str) -> bool:
-    """Idempotency: skip if Alex already replied in this thread."""
+    """Idempotency: skip if Alex already replied in this thread.
+    On a Composio error we DO NOT silently skip (that hid failures) — we log and
+    return False so the reply is still attempted and any real error surfaces."""
     try:
         res = composio_execute("GMAIL_FETCH_MESSAGE_BY_THREAD_ID", {"thread_id": thread_id})
         data = res.get("data", res)
@@ -128,17 +144,22 @@ def already_handled(thread_id: str) -> bool:
             sender = (m.get("sender") or m.get("from") or "").lower()
             if "alex@azfoleyhomes.com" in sender:
                 return True
-    except Exception:
-        # On read failure, fail open to NOT double-send (treat as handled)
-        return True
+    except Exception as e:
+        log.error("already_handled fetch failed for %s, proceeding to reply: %s", thread_id, e)
+        return False
     return False
 
 
-def handle_inquiry(thread_id: str, subject: str, message_id: str = None):
+def handle_inquiry(thread_id: str, subject: str, sender: str = "", message_id: str = None):
     first_name, address = parse_subject(subject)
     if not first_name:
         log.info("Subject not a Zillow inquiry, skipping: %r", subject)
         return "skipped-not-inquiry"
+
+    relay = relay_from_sender(sender)
+    if not relay:
+        log.error("No relay address parsed from sender %r on thread %s", sender, thread_id)
+        return "error-no-relay"
 
     if already_handled(thread_id):
         log.info("Thread %s already has an Alex reply, skipping", thread_id)
@@ -149,9 +170,9 @@ def handle_inquiry(thread_id: str, subject: str, message_id: str = None):
     composio_execute("GMAIL_REPLY_TO_THREAD", {
         "thread_id": thread_id,
         "message_body": body,
-        "recipient_email": "",  # reply stays in-thread to the relay sender
+        "recipient_email": relay,  # reply to the per-inquirer relay address
     })
-    log.info("Sent availability-ask to %s re: %s", first_name, address)
+    log.info("Sent availability-ask to %s (%s) re: %s", first_name, relay, address)
 
     if AWAITING_LABEL:
         composio_execute("GMAIL_MODIFY_THREAD_LABELS", {
@@ -169,21 +190,24 @@ def extract_event(payload: dict):
     # Common shapes
     thread_id = d.get("threadId") or d.get("thread_id")
     subject = d.get("subject")
+    sender = d.get("sender") or d.get("from")
     message_id = d.get("messageId") or d.get("message_id") or d.get("id")
     # Sometimes under d["message"] or d["payload"]
     if not thread_id and isinstance(d.get("message"), dict):
         m = d["message"]
         thread_id = m.get("threadId") or m.get("thread_id")
         subject = subject or m.get("subject")
+        sender = sender or m.get("sender") or m.get("from")
         message_id = message_id or m.get("id")
-    # Subject may live in headers
-    if not subject:
-        headers = d.get("payload", {}).get("headers", []) if isinstance(d.get("payload"), dict) else []
-        for h in headers:
-            if h.get("name", "").lower() == "subject":
-                subject = h.get("value")
-                break
-    return thread_id, subject, message_id
+    # Subject / From may live in headers
+    headers = d.get("payload", {}).get("headers", []) if isinstance(d.get("payload"), dict) else []
+    for h in headers:
+        nm = h.get("name", "").lower()
+        if nm == "subject" and not subject:
+            subject = h.get("value")
+        elif nm == "from" and not sender:
+            sender = h.get("value")
+    return thread_id, subject, sender, message_id
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -212,12 +236,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            thread_id, subject, message_id = extract_event(payload)
+            thread_id, subject, sender, message_id = extract_event(payload)
             if not thread_id:
                 log.info("No thread_id in payload, ignoring")
                 self._send(200, "ignored-no-thread")
                 return
-            result = handle_inquiry(thread_id, subject or "", message_id)
+            result = handle_inquiry(thread_id, subject or "", sender or "", message_id)
             self._send(200, result)
         except Exception as e:
             log.exception("handler error")
