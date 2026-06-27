@@ -49,28 +49,23 @@ COMPOSIO_BASE = "https://backend.composio.dev/api/v3"
 APP_LINK = "https://www.arizonaeliteproperties.com/vacancies"
 
 SIGNATURE = (
-    "Alex Foley\n"
-    "Arizona Elite Properties\n"
-    "2425 S Stearman Dr, Suite #120\n"
-    "Chandler, AZ 85286\n"
-    "Phone: 480-815-9313\n"
-    "Email: alex@azfoleyhomes.com"
+    "Alex\n"
+    "Arizona Elite Properties | 480-815-9313"
 )
 
 
 def availability_ask(first_name: str, address: str) -> str:
-    """Template 1 — Availability Ask, with the vacant-now line."""
+    """Template 1 — Availability Ask. Warm and casual: ask when they're looking to
+    move (do NOT say the home is vacant), soft-mention the application link."""
     return (
         f"Hi {first_name},\n\n"
-        f"Thanks for your interest in {address}! I'd love to get a showing scheduled for you.\n\n"
-        "Good news — the home is vacant right now, so we can get you in to see it right away "
-        "and you could move in quickly once you're approved.\n\n"
-        "What days and times work best over the next week? Here are the windows I have "
-        "available (all times Phoenix):\n\n"
-        "   Monday through Friday, daytime\n"
-        "   Saturday, late morning to early afternoon\n\n"
-        "Send me two or three options and I'll lock one in. To get a jump on the paperwork, "
-        f"you can start an application any time here:\n\n{APP_LINK}\n\n"
+        f"Thanks for reaching out about {address}! Sure, I can get you in to take a look.\n\n"
+        "When are you hoping to move, and what days work best for you? Here's what I have "
+        "open this week (Phoenix time):\n\n"
+        "   Mon to Fri during the day\n"
+        "   Saturday late morning to early afternoon\n\n"
+        "Send me a couple times that work and I'll lock one in. You can also start an "
+        f"application here whenever you're ready: {APP_LINK}\n\n"
         "Looking forward to meeting you!\n\n"
         f"{SIGNATURE}"
     )
