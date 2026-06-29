@@ -56,17 +56,17 @@ SIGNATURE = (
 
 def availability_ask(first_name: str, address: str) -> str:
     """Template 1 — Availability Ask. Warm and casual: ask when they're looking to
-    move (do NOT say the home is vacant), soft-mention the application link."""
+    move (do NOT say the home is vacant), have them pick a specific time, soft-mention
+    the application link. Exact-time booking: they pick a time, we lock that slot."""
     return (
         f"Hi {first_name},\n\n"
-        f"Thanks for reaching out about {address}! We show this one open-house style, "
-        "so it's an easy one to come see.\n\n"
-        "When are you hoping to move? Here are the times we have open this week "
-        "(Phoenix time):\n\n"
+        f"Thanks for reaching out about {address}! I'd love to get you in to see it.\n\n"
+        "When are you hoping to move, and what day and time works to come take a look? "
+        "Here's when I have open this week (Phoenix time):\n\n"
         "   Mon, Wed, Fri: 10:00 AM to 6:30 PM\n"
         "   Tue, Thu: 10:00 AM to 3:00 PM\n"
         "   Sat, Sun: 10:00 AM to 2:00 PM\n\n"
-        "Let me know what works for you and I'll get you set. You can also start an "
+        "Pick a time that works and I'll lock it in for you. You can also start an "
         f"application here whenever you're ready: {APP_LINK}\n\n"
         "Looking forward to meeting you!\n\n"
         f"{SIGNATURE}"
