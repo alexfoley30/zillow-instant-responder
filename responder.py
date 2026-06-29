@@ -49,8 +49,12 @@ COMPOSIO_BASE = "https://backend.composio.dev/api/v3"
 APP_LINK = "https://www.arizonaeliteproperties.com/vacancies"
 
 SIGNATURE = (
-    "Alex\n"
-    "Arizona Elite Properties | 480-815-9313"
+    "Alex Foley\n"
+    "Realtor & Property Manager\n"
+    "Boundless Real Estate Arizona — Team Leader\n"
+    "Powered by Arizona Elite Properties  |  License SA662452000\n"
+    "480-815-9313  |  alex@azfoleyhomes.com  |  @alex.e.foley\n"
+    "2425 S Stearman Dr, Suite 120, Chandler, AZ 85286"
 )
 
 
