@@ -40,6 +40,7 @@ COMPOSIO_API_KEY = os.environ.get("COMPOSIO_API_KEY", "")
 CONNECTED_ACCOUNT_ID = os.environ.get("COMPOSIO_CONNECTED_ACCOUNT_ID", "")
 COMPOSIO_USER_ID = os.environ.get("COMPOSIO_USER_ID", "")
 AWAITING_LABEL = os.environ.get("AWAITING_RENTER_LABEL_ID", "")
+HANDLED_LABEL = os.environ.get("HANDLED_LABEL_ID", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 PORT = int(os.environ.get("PORT", "8080"))
 
@@ -47,6 +48,48 @@ COMPOSIO_BASE = "https://backend.composio.dev/api/v3"
 
 # Application link reused in the reply
 APP_LINK = "https://www.arizonaeliteproperties.com/vacancies"
+
+# Current-rentals page for leased/off-market redirects
+FOR_RENT_LINK = "https://boundlessaz.com/for-rent.html"
+
+# Leased / off-market properties. Inquiries matching one of these get the
+# "leased" reply instead of an availability ask, and the thread is labeled
+# zillow/handled (nothing for the sweep to book).
+# KEEP IN SYNC with "LEASED / OFF-MARKET PROPERTIES" in
+# ~/.claude/scheduled-tasks/zillow-inquiry-sweep/SKILL.md — remove an address
+# only when Alex says it's back on the market.
+BLOCKED_ADDRESSES = [
+    "3309 E San Remo Ave",  # Gilbert, AZ 85234 — leased 2026-07-04
+]
+
+# Matching mirrors the sweep: an inquiry is about a blocked house if its
+# address contains BOTH the street NUMBER and the street-NAME core
+# (directionals like E/W and street types like Ave/Rd stripped), case-insensitive.
+_DIRECTIONALS = {"n", "s", "e", "w", "ne", "nw", "se", "sw",
+                 "north", "south", "east", "west"}
+_STREET_TYPES = {"ave", "avenue", "st", "street", "dr", "drive", "rd", "road",
+                 "ln", "lane", "ct", "court", "blvd", "boulevard", "way",
+                 "pl", "place", "cir", "circle", "trl", "trail", "pkwy",
+                 "parkway", "loop", "ter", "terrace"}
+
+
+def _number_and_core(address: str):
+    """'3309 E San Remo Ave' -> ('3309', 'san remo'); (None, None) if unparseable."""
+    tokens = re.findall(r"[a-z0-9']+", address.lower())
+    if not tokens or not tokens[0].isdigit():
+        return None, None
+    core = [t for t in tokens[1:] if t not in _DIRECTIONALS and t not in _STREET_TYPES]
+    return tokens[0], " ".join(core)
+
+
+def is_blocked_address(address: str) -> bool:
+    """True if the inquiry address matches a leased/off-market property."""
+    a = address.lower()
+    for blocked in BLOCKED_ADDRESSES:
+        number, core = _number_and_core(blocked)
+        if number and core and number in a and core in a:
+            return True
+    return False
 
 SIGNATURE = (
     "Alex Foley\n"
@@ -73,6 +116,21 @@ def availability_ask(first_name: str, address: str) -> str:
         "Pick a time that works and I'll lock it in for you. You can also start an "
         f"application here whenever you're ready: {APP_LINK}\n\n"
         "Looking forward to meeting you!\n\n"
+        f"{SIGNATURE}"
+    )
+
+
+def leased_reply(first_name: str, address: str) -> str:
+    """Blocked-address reply — the home is leased; redirect to current rentals
+    and invite them to share what they're looking for."""
+    return (
+        f"Hi {first_name},\n\n"
+        f"Thanks for reaching out about {address}! I'm sorry to say that home has "
+        "been leased and is no longer available.\n\n"
+        "You can see everything we currently have for rent here: "
+        f"{FOR_RENT_LINK}\n\n"
+        "And if you tell me a little about what you're looking for (beds, area, "
+        "budget, move-in date), I'm happy to point you toward anything that fits.\n\n"
         f"{SIGNATURE}"
     )
 
@@ -168,6 +226,22 @@ def handle_inquiry(thread_id: str, subject: str, sender: str = "", message_id: s
     if already_handled(thread_id):
         log.info("Thread %s already has an Alex reply, skipping", thread_id)
         return "skipped-already-handled"
+
+    if is_blocked_address(address):
+        body = leased_reply(first_name, address)
+        composio_execute("GMAIL_REPLY_TO_THREAD", {
+            "thread_id": thread_id,
+            "message_body": body,
+            "recipient_email": relay,
+        })
+        log.info("Sent leased reply to %s (%s) re: %s", first_name, relay, address)
+        if HANDLED_LABEL:
+            composio_execute("GMAIL_MODIFY_THREAD_LABELS", {
+                "thread_id": thread_id,
+                "add_label_ids": [HANDLED_LABEL],
+                "remove_label_ids": [],
+            })
+        return f"replied-leased:{first_name}:{address}"
 
     body = availability_ask(first_name, address)
 
