@@ -31,6 +31,8 @@ import json
 import logging
 import urllib.request
 import urllib.error
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -101,6 +103,30 @@ SIGNATURE = (
 )
 
 
+def offer_existing(first_name: str, address: str, when_human: str) -> str:
+    """Template OE — Offer Existing showing (CONSOLIDATE FIRST, Alex 2026-07-07:
+    'we should be proposing our current bookings first'). The house already has a
+    showing on the calendar, so the FIRST reply offers that exact time instead of
+    an open-ended availability ask. If they can't make it, they tell us what works
+    and the sweep schedules from there."""
+    return (
+        f"Hi {first_name},\n\n"
+        f"Thanks for reaching out about {address}! Great timing, we actually have "
+        f"a showing already lined up there on {when_human} (Arizona time). "
+        "Any chance you could make that one? I can add you right in.\n\n"
+        "If that time doesn't work, no problem at all. Just tell me what day and "
+        "time works for you and I'll get you set up. Here's when I have open this "
+        "week (Phoenix time):\n\n"
+        "   Mon, Wed, Fri: 10:00 AM to 6:30 PM\n"
+        "   Tue, Thu: 10:00 AM to 3:00 PM\n"
+        "   Sat, Sun: 10:00 AM to 2:00 PM\n\n"
+        "You can also start an application here whenever you're ready: "
+        f"{APP_LINK}\n\n"
+        "Looking forward to meeting you!\n\n"
+        f"{SIGNATURE}"
+    )
+
+
 def availability_ask(first_name: str, address: str) -> str:
     """Template 1 — Availability Ask. Warm and casual: ask when they're looking to
     move (do NOT say the home is vacant), have them pick a specific time, soft-mention
@@ -162,7 +188,9 @@ def composio_execute(tool_slug: str, arguments: dict) -> dict:
     user's default Gmail connection."""
     url = f"{COMPOSIO_BASE}/tools/execute/{tool_slug}"
     payload = {"user_id": COMPOSIO_USER_ID, "arguments": arguments}
-    if CONNECTED_ACCOUNT_ID.startswith("ca_"):
+    # CONNECTED_ACCOUNT_ID is the GMAIL account — attaching it to a calendar
+    # tool would 400. Non-Gmail tools resolve via the user's default connection.
+    if CONNECTED_ACCOUNT_ID.startswith("ca_") and tool_slug.startswith("GMAIL_"):
         payload["connected_account_id"] = CONNECTED_ACCOUNT_ID
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -178,6 +206,70 @@ def composio_execute(tool_slug: str, arguments: dict) -> dict:
     except Exception as e:
         log.error("Composio %s error: %s", tool_slug, e)
         raise
+
+
+AZ_TZ = ZoneInfo("America/Phoenix")
+SHOWING_MIN_LEAD_HOURS = 3  # don't offer a slot the renter can't realistically react to
+
+
+def _fmt_showing_time(start_az: datetime) -> str:
+    """'Wednesday, July 8, at 6:30 PM' (with today/tomorrow prefix when true)."""
+    now_az = datetime.now(AZ_TZ)
+    day = start_az.strftime("%A, %B %-d")
+    if start_az.date() == now_az.date():
+        day = f"today, {day}"
+    elif start_az.date() == (now_az + timedelta(days=1)).date():
+        day = f"tomorrow, {day}"
+    t = start_az.strftime("%-I:%M %p")
+    return f"{day}, at {t}"
+
+
+def find_existing_showing(address: str):
+    """CONSOLIDATE FIRST: look for an upcoming showing at THIS house on the
+    calendar (next 7 days). Returns a human time string or None. Any failure
+    returns None so the instant reply is never blocked."""
+    # Street part only — the full inquiry address carries ", City, AZ, zip"
+    # which would poison the street-name core.
+    number, core = _number_and_core(address.split(",")[0])
+    if not number or not core:
+        return None
+    try:
+        now = datetime.now(timezone.utc)
+        res = composio_execute("GOOGLECALENDAR_EVENTS_LIST", {
+            "calendarId": "primary",
+            "timeMin": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "timeMax": (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "singleEvents": True,
+            "orderBy": "startTime",
+            "maxResults": 50,
+        })
+        data = res.get("data", res)
+        items = data.get("items") or data.get("events") or []
+        if isinstance(data, dict) and not items and isinstance(data.get("event_data"), dict):
+            items = data["event_data"].get("event_data", []) or []
+        for ev in items:
+            if not isinstance(ev, dict):
+                continue
+            hay = " ".join([
+                str(ev.get("summary", "")),
+                str(ev.get("location", "")),
+                str(ev.get("description", "")),
+            ]).lower()
+            # Showing events only: same street number + street-name core.
+            if number not in hay or core not in hay:
+                continue
+            if "showing" not in hay and "open house" not in hay:
+                continue
+            start_raw = (ev.get("start") or {}).get("dateTime")
+            if not start_raw:
+                continue  # all-day events aren't showings
+            start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+            if start < datetime.now(timezone.utc) + timedelta(hours=SHOWING_MIN_LEAD_HOURS):
+                continue
+            return _fmt_showing_time(start.astimezone(AZ_TZ))
+    except Exception as e:
+        log.error("find_existing_showing failed for %r (falling back to availability ask): %s", address, e)
+    return None
 
 
 RELAY_RE = re.compile(r"<([^>]+@[^>]+)>")
@@ -243,14 +335,22 @@ def handle_inquiry(thread_id: str, subject: str, sender: str = "", message_id: s
             })
         return f"replied-leased:{first_name}:{address}"
 
-    body = availability_ask(first_name, address)
+    # CONSOLIDATE FIRST (Alex 2026-07-07): if this house already has a showing
+    # coming up, the first reply offers THAT exact time instead of the open ask.
+    when_human = find_existing_showing(address)
+    if when_human:
+        body = offer_existing(first_name, address, when_human)
+        sent_kind = "offer-existing"
+    else:
+        body = availability_ask(first_name, address)
+        sent_kind = "availability-ask"
 
     composio_execute("GMAIL_REPLY_TO_THREAD", {
         "thread_id": thread_id,
         "message_body": body,
         "recipient_email": relay,  # reply to the per-inquirer relay address
     })
-    log.info("Sent availability-ask to %s (%s) re: %s", first_name, relay, address)
+    log.info("Sent %s to %s (%s) re: %s", sent_kind, first_name, relay, address)
 
     if AWAITING_LABEL:
         composio_execute("GMAIL_MODIFY_THREAD_LABELS", {
@@ -258,7 +358,7 @@ def handle_inquiry(thread_id: str, subject: str, sender: str = "", message_id: s
             "add_label_ids": [AWAITING_LABEL],
             "remove_label_ids": [],
         })
-    return f"replied:{first_name}:{address}"
+    return f"replied-{sent_kind}:{first_name}:{address}"
 
 
 def extract_event(payload: dict):
