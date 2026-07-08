@@ -51,9 +51,6 @@ COMPOSIO_BASE = "https://backend.composio.dev/api/v3"
 # Application link reused in the reply
 APP_LINK = "https://www.arizonaeliteproperties.com/vacancies"
 
-# Current-rentals page for leased/off-market redirects
-FOR_RENT_LINK = "https://boundlessaz.com/for-rent.html"
-
 # Leased / off-market properties. Inquiries matching one of these get the
 # "leased" reply instead of an availability ask, and the thread is labeled
 # zillow/handled (nothing for the sweep to book).
@@ -148,16 +145,13 @@ def availability_ask(first_name: str, address: str) -> str:
 
 
 def leased_reply(first_name: str, address: str) -> str:
-    """Blocked-address reply — the home is leased; redirect to current rentals
-    and invite them to share what they're looking for."""
+    """Blocked-address reply — the home is leased. Short and final: NO other-listing
+    recommendations (Alex 2026-07-08: "the houses are all too variable")."""
     return (
         f"Hi {first_name},\n\n"
         f"Thanks for reaching out about {address}! I'm sorry to say that home has "
-        "been leased and is no longer available.\n\n"
-        "You can see everything we currently have for rent here: "
-        f"{FOR_RENT_LINK}\n\n"
-        "And if you tell me a little about what you're looking for (beds, area, "
-        "budget, move-in date), I'm happy to point you toward anything that fits.\n\n"
+        "been rented and is no longer available.\n\n"
+        "Best of luck with your search!\n\n"
         f"{SIGNATURE}"
     )
 
