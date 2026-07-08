@@ -61,7 +61,8 @@ FOR_RENT_LINK = "https://boundlessaz.com/for-rent.html"
 # ~/.claude/scheduled-tasks/zillow-inquiry-sweep/SKILL.md — remove an address
 # only when Alex says it's back on the market.
 BLOCKED_ADDRESSES = [
-    "3309 E San Remo Ave",  # Gilbert, AZ 85234 — leased 2026-07-04
+    "3309 E San Remo Ave",   # Gilbert, AZ 85234 — leased 2026-07-04
+    "8743 E Palo Verde Dr",  # Scottsdale, AZ 85250 — leased 2026-07-08
 ]
 
 # Matching mirrors the sweep: an inquiry is about a blocked house if its
