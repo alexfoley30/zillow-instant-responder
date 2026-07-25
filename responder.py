@@ -43,6 +43,10 @@ CONNECTED_ACCOUNT_ID = os.environ.get("COMPOSIO_CONNECTED_ACCOUNT_ID", "")
 COMPOSIO_USER_ID = os.environ.get("COMPOSIO_USER_ID", "")
 AWAITING_LABEL = os.environ.get("AWAITING_RENTER_LABEL_ID", "")
 HANDLED_LABEL = os.environ.get("HANDLED_LABEL_ID", "")
+# zillow/needs-reply: applied when the inquiry contains a real question so the
+# 15-min sweep answers it substantively (from the property fact sheet). Default
+# is the live label id; override via env if the label is ever recreated.
+NEEDS_REPLY_LABEL = os.environ.get("NEEDS_REPLY_LABEL_ID", "Label_2252577853408309931")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 PORT = int(os.environ.get("PORT", "8080"))
 
@@ -101,7 +105,16 @@ SIGNATURE = (
 )
 
 
-def offer_existing(first_name: str, address: str, when_human: str) -> str:
+# Ack line inserted when the inquiry contained a real question (Alex 2026-07-24,
+# after the Maria/Coronado miss: the generic template ignored her fence/turf
+# questions). The sweep answers substantively within ~15 min via zillow/needs-reply.
+QUESTION_ACK = (
+    "Great question! I'm checking on that for you and will follow up with an "
+    "answer shortly. In the meantime, let's get you set up to see the place.\n\n"
+)
+
+
+def offer_existing(first_name: str, address: str, when_human: str, ack: bool = False) -> str:
     """Template OE — Offer Existing showing (CONSOLIDATE FIRST, Alex 2026-07-07:
     'we should be proposing our current bookings first'). The house already has a
     showing on the calendar, so the FIRST reply offers that exact time instead of
@@ -109,7 +122,8 @@ def offer_existing(first_name: str, address: str, when_human: str) -> str:
     and the sweep schedules from there."""
     return (
         f"Hi {first_name},\n\n"
-        f"Thanks for reaching out about {address}! Great timing, we actually have "
+        + (QUESTION_ACK if ack else "")
+        + f"Thanks for reaching out about {address}! Great timing, we actually have "
         f"a showing already lined up there on {when_human} (Arizona time). "
         "Any chance you could make that one? I can add you right in.\n\n"
         "If that time doesn't work, no problem at all. Just tell me what day and "
@@ -125,13 +139,14 @@ def offer_existing(first_name: str, address: str, when_human: str) -> str:
     )
 
 
-def availability_ask(first_name: str, address: str) -> str:
+def availability_ask(first_name: str, address: str, ack: bool = False) -> str:
     """Template 1 — Availability Ask. Warm and casual: ask when they're looking to
     move (do NOT say the home is vacant), have them pick a specific time, soft-mention
     the application link. Exact-time booking: they pick a time, we lock that slot."""
     return (
         f"Hi {first_name},\n\n"
-        f"Thanks for reaching out about {address}! I'd love to get you in to see it.\n\n"
+        + (QUESTION_ACK if ack else "")
+        + f"Thanks for reaching out about {address}! I'd love to get you in to see it.\n\n"
         "When are you hoping to move, and what day and time works to come take a look? "
         "Here's when I have open this week (Phoenix time):\n\n"
         "   Mon, Wed, Fri: 10:00 AM to 6:30 PM\n"
@@ -299,6 +314,39 @@ def already_handled(thread_id: str) -> bool:
     return False
 
 
+# The renter's actual words sit between "<Name> says:" and the next Zillow chrome
+# line. Everything else in the relay email is boilerplate that ALWAYS contains
+# question marks (fair-housing links, "Have questions or need help?"), so the
+# question check must run on the extracted message only.
+RENTER_SAYS_RE = re.compile(
+    r"says:\s*(?P<msg>.+?)(?:Reply to \w|Send application|About [A-Z]|You can also reply)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def inquiry_has_question(thread_id: str) -> bool:
+    """True when the renter's own message in the first inquiry contains a real
+    question. Parse failure or fetch failure returns False (safe default: the
+    old behavior, a plain availability ask). Alex 2026-07-24 after the
+    Maria/Coronado miss: fence/turf questions got the generic template."""
+    try:
+        res = composio_execute("GMAIL_FETCH_MESSAGE_BY_THREAD_ID", {"thread_id": thread_id})
+        data = res.get("data", res)
+        msgs = data.get("messages", []) if isinstance(data, dict) else []
+        if not msgs:
+            return False
+        first = msgs[0]
+        body = first.get("messageText") or first.get("snippet") or ""
+        m = RENTER_SAYS_RE.search(body)
+        if not m:
+            return False
+        renter_msg = m.group("msg")
+        return "?" in renter_msg
+    except Exception as e:
+        log.error("inquiry_has_question failed for %s, defaulting False: %s", thread_id, e)
+        return False
+
+
 def handle_inquiry(thread_id: str, subject: str, sender: str = "", message_id: str = None):
     first_name, address = parse_subject(subject)
     if not first_name:
@@ -330,15 +378,22 @@ def handle_inquiry(thread_id: str, subject: str, sender: str = "", message_id: s
             })
         return f"replied-leased:{first_name}:{address}"
 
+    # QUESTION DETECTION (Alex 2026-07-24): if the renter asked something real,
+    # acknowledge it in the instant reply and label zillow/needs-reply so the
+    # 15-min sweep answers substantively from the property fact sheet.
+    has_q = inquiry_has_question(thread_id)
+
     # CONSOLIDATE FIRST (Alex 2026-07-07): if this house already has a showing
     # coming up, the first reply offers THAT exact time instead of the open ask.
     when_human = find_existing_showing(address)
     if when_human:
-        body = offer_existing(first_name, address, when_human)
+        body = offer_existing(first_name, address, when_human, ack=has_q)
         sent_kind = "offer-existing"
     else:
-        body = availability_ask(first_name, address)
+        body = availability_ask(first_name, address, ack=has_q)
         sent_kind = "availability-ask"
+    if has_q:
+        sent_kind += "+question-ack"
 
     composio_execute("GMAIL_REPLY_TO_THREAD", {
         "thread_id": thread_id,
@@ -347,10 +402,11 @@ def handle_inquiry(thread_id: str, subject: str, sender: str = "", message_id: s
     })
     log.info("Sent %s to %s (%s) re: %s", sent_kind, first_name, relay, address)
 
-    if AWAITING_LABEL:
+    add_labels = [l for l in [AWAITING_LABEL, NEEDS_REPLY_LABEL if has_q else ""] if l]
+    if add_labels:
         composio_execute("GMAIL_MODIFY_THREAD_LABELS", {
             "thread_id": thread_id,
-            "add_label_ids": [AWAITING_LABEL],
+            "add_label_ids": add_labels,
             "remove_label_ids": [],
         })
     return f"replied-{sent_kind}:{first_name}:{address}"
