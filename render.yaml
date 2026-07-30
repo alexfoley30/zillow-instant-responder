@@ -1,11 +1,14 @@
-# Render.com deploy config — free/cheap always-on host for the instant responder.
-# Render reads this on deploy. Pure Python stdlib, no build step, no dependencies.
+# Render.com deploy config — the single-writer Zillow pipeline (v2, 2026-07-28).
+# One service owns every renter-facing send; Firestore is the ledger.
+# The firebase service-account JSON goes in as a Render SECRET FILE named
+# firebase-sa.json (dashboard -> Environment -> Secret Files), referenced by
+# GOOGLE_APPLICATION_CREDENTIALS below. Never commit credentials.
 services:
   - type: web
     name: zillow-instant-responder
     runtime: python
-    plan: starter            # ~$7/mo always-on; "free" plan sleeps after inactivity (bad for instant)
-    buildCommand: ""         # nothing to build, stdlib only
+    plan: starter            # ~$7/mo always-on; free plan sleeps (bad for instant)
+    buildCommand: "pip install -r requirements.txt"
     startCommand: python responder.py
     healthCheckPath: /
     envVars:
@@ -13,9 +16,21 @@ services:
         sync: false          # set in dashboard, never commit
       - key: COMPOSIO_CONNECTED_ACCOUNT_ID
         sync: false
+      - key: COMPOSIO_USER_ID
+        sync: false
       - key: AWAITING_RENTER_LABEL_ID
         sync: false
       - key: HANDLED_LABEL_ID
         sync: false
+      - key: NEEDS_REPLY_LABEL_ID
+        sync: false
       - key: WEBHOOK_SECRET
         sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false          # Haiku micro-calls (classify/extract only)
+      - key: POKE_ENDPOINT
+        sync: false          # sanctioned pings: needs-you / away-block / same-day Jace
+      - key: DRY_RUN
+        value: "true"        # shadow mode until cutover; flip to "false" to go live
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /etc/secrets/firebase-sa.json

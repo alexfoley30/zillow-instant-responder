@@ -1,179 +1,66 @@
 #!/usr/bin/env python3
 """
-Zillow Instant Responder — sub-30-second auto-reply to new Zillow rental inquiries.
+Zillow pipeline — SINGLE-WRITER service. v2 (2026-07-28 rebuild).
 
-Architecture (the "instant layer"):
-  New Zillow email lands
-    -> Composio Gmail trigger fires a webhook POST to THIS service
-    -> we parse the inquirer's first name + property address from the subject
-    -> send Template 1 (availability ask) in-thread via Composio
-    -> apply the zillow/awaiting-renter label
-  ...all in a few seconds, no LLM in the hot path.
+This service owns EVERY renter-facing send: instant first replies, question
+handling, time parsing, booking, confirmations, counters, nudges. The Claude
+sweep is a non-sending watchdog that POSTs /reprocess when it finds drift.
 
-The "smart layer" (booking, calendar, drive-time) stays on the existing 5-minute
-sweep, which picks up the renter's reply from the zillow/awaiting-renter label.
+Why: duplicates kept recurring because two writers (this service + the sweep)
+each re-derived "should I reply?" from non-transactional Gmail state. Now every
+send must first win a Firestore create-once lock (ledger.reserve_send); losing
+the create means someone else already handled it. No lock, no send. Ever.
 
-This service is deliberately deterministic: no AI, no token cost, trivial to host.
+Flow per inbound message:
+  secret -> extract -> self-send skip -> claim_message (dup delivery gate)
+  -> Composio full-thread fetch -> claim_content_hash (Zillow dup-copy gate)
+  -> alex_replied_after gate -> route:
+       new inquiry  : leased? -> leased reply | consolidate-first -> OE/T1
+       known thread : classify (Haiku extracts, code decides) ->
+                      fold/book/counter/answer/apply-first/as-is/NEEDS_HUMAN
+       legacy thread: reconstruct minimal state, then treat as known
+DRY_RUN=true writes zillow_shadow docs instead of sending/labeling/booking.
 
-Env vars required (set these in your host's dashboard, never hardcode):
-  COMPOSIO_API_KEY        - your (rotated) Composio key, e.g. ck_xxx
-  COMPOSIO_CONNECTED_ACCOUNT_ID - the Gmail connected-account id (gmail_boast-punnet)
-  AWAITING_RENTER_LABEL_ID - Gmail label id for zillow/awaiting-renter (e.g. Label_NN)
-  HANDLED_LABEL_ID        - Gmail label id for zillow/handled
-  WEBHOOK_SECRET          - shared secret; Composio sends it, we verify it
-  PORT                    - provided by the host (Render/Railway set this)
+Env (Render dashboard):
+  COMPOSIO_API_KEY, COMPOSIO_CONNECTED_ACCOUNT_ID, COMPOSIO_USER_ID
+  AWAITING_RENTER_LABEL_ID, HANDLED_LABEL_ID, NEEDS_REPLY_LABEL_ID
+  WEBHOOK_SECRET, PORT
+  GOOGLE_APPLICATION_CREDENTIALS=/etc/secrets/firebase-sa.json
+  ANTHROPIC_API_KEY, POKE_ENDPOINT, DRY_RUN ("true"/"false")
 """
 
-import os
-import re
-import sys
 import json
 import logging
-import urllib.request
-import urllib.error
-from datetime import datetime, timedelta, timezone
+import os
+import re
+from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
-from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import calendar_logic as cal
+import cron
+import facts
+import gmail_client as gm
+import ledger
+import llm
+import rules
+import templates as T
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("zillow-instant")
 
-COMPOSIO_API_KEY = os.environ.get("COMPOSIO_API_KEY", "")
-CONNECTED_ACCOUNT_ID = os.environ.get("COMPOSIO_CONNECTED_ACCOUNT_ID", "")
-COMPOSIO_USER_ID = os.environ.get("COMPOSIO_USER_ID", "")
+AZ_TZ = ZoneInfo("America/Phoenix")
+PORT = int(os.environ.get("PORT", "8080"))
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 AWAITING_LABEL = os.environ.get("AWAITING_RENTER_LABEL_ID", "")
 HANDLED_LABEL = os.environ.get("HANDLED_LABEL_ID", "")
-# zillow/needs-reply: applied when the inquiry contains a real question so the
-# 15-min sweep answers it substantively (from the property fact sheet). Default
-# is the live label id; override via env if the label is ever recreated.
 NEEDS_REPLY_LABEL = os.environ.get("NEEDS_REPLY_LABEL_ID", "Label_2252577853408309931")
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
-PORT = int(os.environ.get("PORT", "8080"))
-
-COMPOSIO_BASE = "https://backend.composio.dev/api/v3"
-
-# Application link reused in the reply
-APP_LINK = "https://www.arizonaeliteproperties.com/vacancies"
-
-# Leased / off-market properties. Inquiries matching one of these get the
-# "leased" reply instead of an availability ask, and the thread is labeled
-# zillow/handled (nothing for the sweep to book).
-# KEEP IN SYNC with "LEASED / OFF-MARKET PROPERTIES" in
-# ~/.claude/scheduled-tasks/zillow-inquiry-sweep/SKILL.md — remove an address
-# only when Alex says it's back on the market.
-BLOCKED_ADDRESSES = [
-    "3309 E San Remo Ave",   # Gilbert, AZ 85234 — leased 2026-07-04
-    "8743 E Palo Verde Dr",  # Scottsdale, AZ 85250 — leased 2026-07-08
-]
-
-# Matching mirrors the sweep: an inquiry is about a blocked house if its
-# address contains BOTH the street NUMBER and the street-NAME core
-# (directionals like E/W and street types like Ave/Rd stripped), case-insensitive.
-_DIRECTIONALS = {"n", "s", "e", "w", "ne", "nw", "se", "sw",
-                 "north", "south", "east", "west"}
-_STREET_TYPES = {"ave", "avenue", "st", "street", "dr", "drive", "rd", "road",
-                 "ln", "lane", "ct", "court", "blvd", "boulevard", "way",
-                 "pl", "place", "cir", "circle", "trl", "trail", "pkwy",
-                 "parkway", "loop", "ter", "terrace"}
 
 
-def _number_and_core(address: str):
-    """'3309 E San Remo Ave' -> ('3309', 'san remo'); (None, None) if unparseable."""
-    tokens = re.findall(r"[a-z0-9']+", address.lower())
-    if not tokens or not tokens[0].isdigit():
-        return None, None
-    core = [t for t in tokens[1:] if t not in _DIRECTIONALS and t not in _STREET_TYPES]
-    return tokens[0], " ".join(core)
+def dry_run() -> bool:
+    return os.environ.get("DRY_RUN", "true").strip().lower() != "false"
 
 
-def is_blocked_address(address: str) -> bool:
-    """True if the inquiry address matches a leased/off-market property."""
-    a = address.lower()
-    for blocked in BLOCKED_ADDRESSES:
-        number, core = _number_and_core(blocked)
-        if number and core and number in a and core in a:
-            return True
-    return False
-
-SIGNATURE = (
-    "Alex Foley\n"
-    "Realtor & Property Manager\n"
-    "Boundless Real Estate Arizona — Team Leader\n"
-    "Powered by Arizona Elite Properties  |  License SA662452000\n"
-    "480-815-9313  |  alex@azfoleyhomes.com  |  @alex.e.foley\n"
-    "2425 S Stearman Dr, Suite 120, Chandler, AZ 85286"
-)
-
-
-# Ack line inserted when the inquiry contained a real question (Alex 2026-07-24,
-# after the Maria/Coronado miss: the generic template ignored her fence/turf
-# questions). The sweep answers substantively within ~15 min via zillow/needs-reply.
-QUESTION_ACK = (
-    "Great question! I'm checking on that for you and will follow up with an "
-    "answer shortly. In the meantime, let's get you set up to see the place.\n\n"
-)
-
-
-def offer_existing(first_name: str, address: str, when_human: str, ack: bool = False) -> str:
-    """Template OE — Offer Existing showing (CONSOLIDATE FIRST, Alex 2026-07-07:
-    'we should be proposing our current bookings first'). The house already has a
-    showing on the calendar, so the FIRST reply offers that exact time instead of
-    an open-ended availability ask. If they can't make it, they tell us what works
-    and the sweep schedules from there."""
-    return (
-        f"Hi {first_name},\n\n"
-        + (QUESTION_ACK if ack else "")
-        + f"Thanks for reaching out about {address}! Great timing, we actually have "
-        f"a showing already lined up there on {when_human} (Arizona time). "
-        "Any chance you could make that one? I can add you right in.\n\n"
-        "If that time doesn't work, no problem at all. Just tell me what day and "
-        "time works for you and I'll get you set up. Here's when I have open this "
-        "week (Phoenix time):\n\n"
-        "   Mon, Wed, Fri: 10:00 AM to 6:30 PM\n"
-        "   Tue, Thu: 10:00 AM to 3:00 PM\n"
-        "   Sat, Sun: 10:00 AM to 2:00 PM\n\n"
-        "You can also start an application here whenever you're ready: "
-        f"{APP_LINK}\n\n"
-        "Looking forward to meeting you!\n\n"
-        f"{SIGNATURE}"
-    )
-
-
-def availability_ask(first_name: str, address: str, ack: bool = False) -> str:
-    """Template 1 — Availability Ask. Warm and casual: ask when they're looking to
-    move (do NOT say the home is vacant), have them pick a specific time, soft-mention
-    the application link. Exact-time booking: they pick a time, we lock that slot."""
-    return (
-        f"Hi {first_name},\n\n"
-        + (QUESTION_ACK if ack else "")
-        + f"Thanks for reaching out about {address}! I'd love to get you in to see it.\n\n"
-        "When are you hoping to move, and what day and time works to come take a look? "
-        "Here's when I have open this week (Phoenix time):\n\n"
-        "   Mon, Wed, Fri: 10:00 AM to 6:30 PM\n"
-        "   Tue, Thu: 10:00 AM to 3:00 PM\n"
-        "   Sat, Sun: 10:00 AM to 2:00 PM\n\n"
-        "Pick a time that works and I'll lock it in for you. Same-day tours are "
-        "usually doable too if you give me a couple hours' notice. You can also start an "
-        f"application here whenever you're ready: {APP_LINK}\n\n"
-        "Looking forward to meeting you!\n\n"
-        f"{SIGNATURE}"
-    )
-
-
-def leased_reply(first_name: str, address: str) -> str:
-    """Blocked-address reply — the home is leased. Short and final: NO other-listing
-    recommendations (Alex 2026-07-08: "the houses are all too variable")."""
-    return (
-        f"Hi {first_name},\n\n"
-        f"Thanks for reaching out about {address}! I'm sorry to say that home has "
-        "been rented and is no longer available.\n\n"
-        "Best of luck with your search!\n\n"
-        f"{SIGNATURE}"
-    )
-
-
-# Subject looks like: "Karen is requesting information about 22924 E Nightingale Rd, Queen Creek, AZ, 85142"
-# or "Re: {FirstName} is requesting an application for {address}"
 SUBJECT_RE = re.compile(
     r"^(?:Re:\s*)?(?P<name>[A-Za-z][\w'’.-]*)\s+is\s+requesting\s+"
     r"(?:information about|an application for)\s+(?P<address>.+?)\s*$",
@@ -182,7 +69,6 @@ SUBJECT_RE = re.compile(
 
 
 def parse_subject(subject: str):
-    """Return (first_name, address) or (None, None) if it doesn't match a Zillow inquiry."""
     if not subject:
         return None, None
     m = SUBJECT_RE.match(subject.strip())
@@ -191,254 +77,472 @@ def parse_subject(subject: str):
     return m.group("name").strip(), m.group("address").strip()
 
 
-def composio_execute(tool_slug: str, arguments: dict) -> dict:
-    """Call a Composio tool via the v3 execute endpoint.
-    Only send connected_account_id if it's a real account id (ca_...). A misconfigured
-    env (e.g. the API key pasted in by mistake) would otherwise cause a 400
-    ConnectedAccountNotFound; falling back to user_id lets Composio resolve the
-    user's default Gmail connection."""
-    url = f"{COMPOSIO_BASE}/tools/execute/{tool_slug}"
-    payload = {"user_id": COMPOSIO_USER_ID, "arguments": arguments}
-    # CONNECTED_ACCOUNT_ID is the GMAIL account — attaching it to a calendar
-    # tool would 400. Non-Gmail tools resolve via the user's default connection.
-    if CONNECTED_ACCOUNT_ID.startswith("ca_") and tool_slug.startswith("GMAIL_"):
-        payload["connected_account_id"] = CONNECTED_ACCOUNT_ID
-    body = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url, data=body, method="POST",
-        headers={"x-api-key": COMPOSIO_API_KEY, "Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            return json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        log.error("Composio %s HTTP %s: %s", tool_slug, e.code, e.read().decode(errors="ignore")[:300])
-        raise
-    except Exception as e:
-        log.error("Composio %s error: %s", tool_slug, e)
-        raise
+# ---------------------------------------------------------------- send core
 
-
-AZ_TZ = ZoneInfo("America/Phoenix")
-SHOWING_MIN_LEAD_HOURS = 3  # don't offer a slot the renter can't realistically react to
-
-
-def _fmt_showing_time(start_az: datetime) -> str:
-    """'Wednesday, July 8, at 6:30 PM' (with today/tomorrow prefix when true)."""
-    now_az = datetime.now(AZ_TZ)
-    day = start_az.strftime("%A, %B %-d")
-    if start_az.date() == now_az.date():
-        day = f"today, {day}"
-    elif start_az.date() == (now_az + timedelta(days=1)).date():
-        day = f"tomorrow, {day}"
-    t = start_az.strftime("%-I:%M %p")
-    return f"{day}, at {t}"
-
-
-def find_existing_showing(address: str):
-    """CONSOLIDATE FIRST: look for an upcoming showing at THIS house on the
-    calendar (next 7 days). Returns a human time string or None. Any failure
-    returns None so the instant reply is never blocked."""
-    # Street part only — the full inquiry address carries ", City, AZ, zip"
-    # which would poison the street-name core.
-    number, core = _number_and_core(address.split(",")[0])
-    if not number or not core:
-        return None
-    try:
-        now = datetime.now(timezone.utc)
-        res = composio_execute("GOOGLECALENDAR_EVENTS_LIST", {
-            "calendarId": "primary",
-            "timeMin": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "timeMax": (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "singleEvents": True,
-            "orderBy": "startTime",
-            "maxResults": 50,
-        })
-        data = res.get("data", res)
-        items = data.get("items") or data.get("events") or []
-        if isinstance(data, dict) and not items and isinstance(data.get("event_data"), dict):
-            items = data["event_data"].get("event_data", []) or []
-        for ev in items:
-            if not isinstance(ev, dict):
-                continue
-            hay = " ".join([
-                str(ev.get("summary", "")),
-                str(ev.get("location", "")),
-                str(ev.get("description", "")),
-            ]).lower()
-            # Showing events only: same street number + street-name core.
-            if number not in hay or core not in hay:
-                continue
-            if "showing" not in hay and "open house" not in hay:
-                continue
-            start_raw = (ev.get("start") or {}).get("dateTime")
-            if not start_raw:
-                continue  # all-day events aren't showings
-            start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
-            if start < datetime.now(timezone.utc) + timedelta(hours=SHOWING_MIN_LEAD_HOURS):
-                continue
-            return _fmt_showing_time(start.astimezone(AZ_TZ))
-    except Exception as e:
-        log.error("find_existing_showing failed for %r (falling back to availability ask): %s", address, e)
-    return None
-
-
-RELAY_RE = re.compile(r"<([^>]+@[^>]+)>")
-
-
-def relay_from_sender(sender: str) -> str:
-    """Extract the convo.zillow.com relay address from a 'Name <addr>' sender string."""
-    if not sender:
-        return ""
-    m = RELAY_RE.search(sender)
-    if m:
-        return m.group(1).strip()
-    s = sender.strip()
-    return s if "@" in s else ""
-
-
-def already_handled(thread_id: str) -> bool:
-    """Idempotency: skip if Alex already replied in this thread.
-    On a Composio error we DO NOT silently skip (that hid failures) — we log and
-    return False so the reply is still attempted and any real error surfaces."""
-    try:
-        res = composio_execute("GMAIL_FETCH_MESSAGE_BY_THREAD_ID", {"thread_id": thread_id})
-        data = res.get("data", res)
-        msgs = data.get("messages", []) if isinstance(data, dict) else []
-        for m in msgs:
-            sender = (m.get("sender") or m.get("from") or "").lower()
-            if "alex@azfoleyhomes.com" in sender:
-                return True
-    except Exception as e:
-        log.error("already_handled fetch failed for %s, proceeding to reply: %s", thread_id, e)
-        return False
-    return False
-
-
-# The renter's actual words sit between "<Name> says:" and the next Zillow chrome
-# line. Everything else in the relay email is boilerplate that ALWAYS contains
-# question marks (fair-housing links, "Have questions or need help?"), so the
-# question check must run on the extracted message only.
-RENTER_SAYS_RE = re.compile(
-    r"says:\s*(?P<msg>.+?)(?:Reply to \w|Send application|About [A-Z]|You can also reply)",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def inquiry_has_question(thread_id: str) -> bool:
-    """True when the renter's own message in the first inquiry contains a real
-    question. Parse failure or fetch failure returns False (safe default: the
-    old behavior, a plain availability ask). Alex 2026-07-24 after the
-    Maria/Coronado miss: fence/turf questions got the generic template."""
-    try:
-        res = composio_execute("GMAIL_FETCH_MESSAGE_BY_THREAD_ID", {"thread_id": thread_id})
-        data = res.get("data", res)
-        msgs = data.get("messages", []) if isinstance(data, dict) else []
-        if not msgs:
-            return False
-        first = msgs[0]
-        body = first.get("messageText") or first.get("snippet") or ""
-        m = RENTER_SAYS_RE.search(body)
-        if not m:
-            return False
-        renter_msg = m.group("msg")
-        return "?" in renter_msg
-    except Exception as e:
-        log.error("inquiry_has_question failed for %s, defaulting False: %s", thread_id, e)
-        return False
-
-
-def handle_inquiry(thread_id: str, subject: str, sender: str = "", message_id: str = None):
-    first_name, address = parse_subject(subject)
-    if not first_name:
-        log.info("Subject not a Zillow inquiry, skipping: %r", subject)
-        return "skipped-not-inquiry"
-
-    relay = relay_from_sender(sender)
-    if not relay:
-        log.error("No relay address parsed from sender %r on thread %s", sender, thread_id)
-        return "error-no-relay"
-
-    if already_handled(thread_id):
-        log.info("Thread %s already has an Alex reply, skipping", thread_id)
-        return "skipped-already-handled"
-
-    if is_blocked_address(address):
-        body = leased_reply(first_name, address)
-        composio_execute("GMAIL_REPLY_TO_THREAD", {
-            "thread_id": thread_id,
-            "message_body": body,
-            "recipient_email": relay,
-        })
-        log.info("Sent leased reply to %s (%s) re: %s", first_name, relay, address)
-        if HANDLED_LABEL:
-            composio_execute("GMAIL_MODIFY_THREAD_LABELS", {
-                "thread_id": thread_id,
-                "add_label_ids": [HANDLED_LABEL],
-                "remove_label_ids": [],
-            })
-        return f"replied-leased:{first_name}:{address}"
-
-    # QUESTION DETECTION (Alex 2026-07-24): if the renter asked something real,
-    # acknowledge it in the instant reply and label zillow/needs-reply so the
-    # 15-min sweep answers substantively from the property fact sheet.
-    has_q = inquiry_has_question(thread_id)
-
-    # CONSOLIDATE FIRST (Alex 2026-07-07): if this house already has a showing
-    # coming up, the first reply offers THAT exact time instead of the open ask.
-    when_human = find_existing_showing(address)
-    if when_human:
-        body = offer_existing(first_name, address, when_human, ack=has_q)
-        sent_kind = "offer-existing"
-    else:
-        body = availability_ask(first_name, address, ack=has_q)
-        sent_kind = "availability-ask"
-    if has_q:
-        sent_kind += "+question-ack"
-
-    composio_execute("GMAIL_REPLY_TO_THREAD", {
-        "thread_id": thread_id,
-        "message_body": body,
-        "recipient_email": relay,  # reply to the per-inquirer relay address
+def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
+               labels_add: list, labels_remove: list, meta: dict,
+               trigger_message_id: str = "") -> str:
+    """The ONLY function that sends renter email. Wins the Firestore lock or
+    does nothing. Returns 'sent' | 'shadowed' | 'skipped:<why>'."""
+    meta = dict(meta)
+    meta.update({
+        "template": meta.get("template", stage_key),
+        "body_sha256": ledger.content_hash(body),
+        "to_relay": relay,
+        "trigger_message_id": trigger_message_id,
     })
-    log.info("Sent %s to %s (%s) re: %s", sent_kind, first_name, relay, address)
 
-    add_labels = [l for l in [AWAITING_LABEL, NEEDS_REPLY_LABEL if has_q else ""] if l]
-    if add_labels:
-        composio_execute("GMAIL_MODIFY_THREAD_LABELS", {
-            "thread_id": thread_id,
-            "add_label_ids": add_labels,
-            "remove_label_ids": [],
+    if dry_run():
+        ledger.write_shadow(thread_id, stage_key, {
+            "would_body": body, "would_labels_add": labels_add,
+            "would_labels_remove": labels_remove, **meta,
         })
-    return f"replied-{sent_kind}:{first_name}:{address}"
+        log.info("SHADOW %s %s", thread_id, stage_key)
+        return "shadowed"
+
+    verdict = ledger.reserve_send(thread_id, stage_key, meta)
+    if verdict in ("already-sent", "in-flight"):
+        log.info("send_stage skip (%s): %s %s", verdict, thread_id, stage_key)
+        return f"skipped:{verdict}"
+    if verdict == "recover":
+        # Ambiguity resolves against the source of truth: the thread itself.
+        msgs = gm.fetch_thread(thread_id)
+        if gm.alex_replied_after(msgs, trigger_message_id):
+            ledger.mark_sent(thread_id, stage_key, recovered="backfilled-from-gmail")
+            return "skipped:recovered-already-sent"
+        if not ledger.takeover_send(thread_id, stage_key):
+            return "skipped:takeover-lost"
+
+    try:
+        gm.send_reply(thread_id, relay, body)
+    except Exception as e:  # noqa: BLE001
+        ledger.mark_failed(thread_id, stage_key, str(e))
+        log.error("send failed %s %s: %s", thread_id, stage_key, e)
+        return "skipped:send-failed"
+
+    ledger.mark_sent(thread_id, stage_key)
+
+    try:
+        if labels_add or labels_remove:
+            gm.modify_labels(thread_id, labels_add, labels_remove)
+    except Exception as e:  # noqa: BLE001 - label failure NEVER triggers a resend
+        log.error("label failed %s %s (queued for retry): %s", thread_id, stage_key, e)
+        ledger.set_labels_pending(thread_id, stage_key, labels_add, labels_remove)
+
+    return "sent"
 
 
-def extract_event(payload: dict):
-    """Pull thread_id / subject / message_id out of a Composio Gmail trigger payload.
-    Composio nests the message under data; be defensive about shape."""
-    d = payload.get("data", payload)
-    # Common shapes
-    thread_id = d.get("threadId") or d.get("thread_id")
-    subject = d.get("subject")
-    sender = d.get("sender") or d.get("from")
-    message_id = d.get("messageId") or d.get("message_id") or d.get("id")
-    # Sometimes under d["message"] or d["payload"]
-    if not thread_id and isinstance(d.get("message"), dict):
-        m = d["message"]
-        thread_id = m.get("threadId") or m.get("thread_id")
-        subject = subject or m.get("subject")
-        sender = sender or m.get("sender") or m.get("from")
-        message_id = message_id or m.get("id")
-    # Subject / From may live in headers
-    headers = d.get("payload", {}).get("headers", []) if isinstance(d.get("payload"), dict) else []
-    for h in headers:
-        nm = h.get("name", "").lower()
-        if nm == "subject" and not subject:
-            subject = h.get("value")
-        elif nm == "from" and not sender:
-            sender = h.get("value")
-    return thread_id, subject, sender, message_id
+def needs_human(thread_id: str, first_name: str, address: str, last_line: str):
+    """Escalate: state + rate-limited needs-you Poke (1/day/thread)."""
+    doc = ledger.get_thread(thread_id) or {}
+    last_ping = doc.get("last_needs_human_ping_at")
+    ledger.transition(thread_id, ledger.NEEDS_HUMAN)
+    if last_ping and (datetime.now(AZ_TZ).astimezone(last_ping.tzinfo) - last_ping) < timedelta(days=1):
+        return
+    msg = (f'Needs you: {first_name} — {address.split(",")[0]} — '
+           f'"{(last_line or "")[:80]}". Reply here or in Gmail.')
+    if dry_run():
+        ledger.write_shadow(thread_id, f"poke__{ledger.content_hash(msg)}",
+                            {"would_poke": msg})
+    else:
+        gm.poke_ping(msg)
+        ledger.upsert_thread(thread_id, last_needs_human_ping_at=datetime.now(AZ_TZ))
 
+
+# ---------------------------------------------------------------- new inquiry
+
+def handle_new_inquiry(thread_id: str, first_name: str, address: str,
+                       relay: str, renter_text: str, message_id: str) -> str:
+    if rules.is_blocked_address(address, ledger.blocked_addresses()):
+        ledger.create_thread(thread_id, state=ledger.LEASED, renter_name=first_name,
+                             property_address=address, relay_email=relay)
+        return send_stage(thread_id, "leased", relay,
+                          T.leased_reply(first_name, address),
+                          [HANDLED_LABEL], [], {"template": "leased"}, message_id)
+
+    has_q = "?" in (renter_text or "")
+    existing = None
+    try:
+        existing = cal.find_existing_showing(address)
+    except Exception as e:  # noqa: BLE001 - never block the instant reply
+        log.error("consolidate-first lookup failed: %s", e)
+
+    if existing:
+        body = T.offer_existing(first_name, address, existing["when_human"], ack=has_q)
+        state, template = ledger.OFFERED, "offer_existing"
+        offered_iso = existing["start_az"].isoformat()
+        offered_event = existing["event"].get("id", "")
+    else:
+        body = T.availability_ask(first_name, address, ack=has_q)
+        state, template = ledger.ACKED, "availability_ask"
+        offered_iso, offered_event = None, ""
+
+    ledger.create_thread(
+        thread_id, state=state, renter_name=first_name, property_address=address,
+        relay_email=relay, has_open_question=has_q,
+        offered_start_iso=offered_iso, offered_event_id=offered_event)
+
+    labels = [AWAITING_LABEL] + ([NEEDS_REPLY_LABEL] if has_q else [])
+    result = send_stage(thread_id, "first_reply", relay, body, labels, [],
+                        {"template": template}, message_id)
+    if has_q and result in ("sent", "shadowed"):
+        # The question itself still needs an answer - route it now.
+        route_question(thread_id, first_name, address, relay, renter_text, message_id)
+    return result
+
+
+# ---------------------------------------------------------------- questions
+
+def route_question(thread_id: str, first_name: str, address: str, relay: str,
+                   question_text: str, message_id: str) -> str:
+    rule = facts.standing_rule_for(question_text)
+    body = None
+    if rule == "floor_plan":
+        body = T.floor_plan_reply(first_name)
+    elif rule == "as_is":
+        body = T.as_is_reply(first_name)
+    elif rule == "appliances":
+        body = T.fact_answer(first_name, facts.APPLIANCES_LINE)
+    elif rule == "fair_housing":
+        body = T.fair_housing_steer(first_name)
+    elif rule == "apply_first":
+        return handle_negotiation(thread_id, first_name, relay, message_id)
+
+    if body:
+        return send_stage(thread_id, f"reply__{message_id}", relay, body,
+                          [AWAITING_LABEL], [NEEDS_REPLY_LABEL],
+                          {"template": f"standing:{rule}"}, message_id)
+
+    # No standing rule: hold the renter warmly, escalate to Alex.
+    result = send_stage(thread_id, f"reply__{message_id}", relay,
+                        T.checking_with_owner(first_name),
+                        [NEEDS_REPLY_LABEL], [], {"template": "checking_with_owner"},
+                        message_id)
+    needs_human(thread_id, first_name, address, question_text)
+    return result
+
+
+def handle_negotiation(thread_id: str, first_name: str, relay: str,
+                       message_id: str) -> str:
+    doc = ledger.get_thread(thread_id) or {}
+    if doc.get("negotiation_acked"):
+        log.info("negotiation already acked on %s - silent", thread_id)
+        return "skipped:one-ack-ever"
+    result = send_stage(thread_id, "negotiation_ack", relay,
+                        T.apply_first(first_name), [AWAITING_LABEL], [],
+                        {"template": "apply_first"}, message_id)
+    if result in ("sent", "shadowed"):
+        ledger.upsert_thread(thread_id, negotiation_acked=True)
+    return result
+
+
+# ---------------------------------------------------------------- reply path
+
+def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
+                 message_id: str) -> str:
+    first_name = doc.get("renter_name") or "there"
+    address = doc.get("property_address") or ""
+    relay = gm.relay_from_thread(msgs) or doc.get("relay_email") or ""
+    if not relay:
+        return "error-no-relay"
+    if doc.get("alex_owned"):
+        return "skipped:alex-owned"
+
+    last_alex = next((gm.msg_body(m) for m in reversed(msgs) if gm.is_from_alex(m)), "")
+    now_az = datetime.now(AZ_TZ)
+    cls = llm.classify_reply(renter_text, last_alex, now_az)
+    ledger.record_message_outcome(message_id, "classified", cls)
+    intent = cls["intent"]
+    log.info("reply %s intent=%s%s", thread_id, intent,
+             " (regex-fallback)" if cls.get("_fallback") else "")
+
+    state = doc.get("state", ledger.AWAITING_TIME)
+
+    if intent == "cancellation":
+        return handle_cancellation(thread_id, doc, first_name, relay, message_id)
+
+    if state == ledger.LEASED:
+        return "skipped:leased-thread"
+
+    if intent == "benign_closer":
+        try:
+            if not dry_run():
+                gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
+        except Exception as e:  # noqa: BLE001
+            log.error("benign relabel failed: %s", e)
+        return "no-send:benign"
+
+    if intent == "negotiation":
+        return handle_negotiation(thread_id, first_name, relay, message_id)
+
+    if intent == "modification_request":
+        return send_stage(thread_id, f"reply__{message_id}", relay,
+                          T.as_is_reply(first_name), [AWAITING_LABEL], [],
+                          {"template": "as_is"}, message_id)
+
+    if intent == "question":
+        return route_question(thread_id, first_name, address, relay,
+                              cls.get("question_text") or renter_text, message_id)
+
+    if intent == "applied":
+        needs_human(thread_id, first_name, address, "submitted an application")
+        return "no-send:applied"
+
+    if intent == "accept_offer":
+        return book_accepted_offer(thread_id, doc, first_name, address, relay, message_id)
+
+    if intent == "propose_time":
+        return book_proposed_time(thread_id, doc, first_name, address, relay,
+                                  cls, message_id, now_az)
+
+    if intent == "vague_time":
+        return send_stage(thread_id, f"reply__{message_id}", relay,
+                          T.windows_ask(first_name), [AWAITING_LABEL], [],
+                          {"template": "windows_ask"}, message_id)
+
+    # other / unparseable: fail safe, never guess.
+    needs_human(thread_id, first_name, address, renter_text[:120])
+    return "no-send:needs-human"
+
+
+def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) -> str:
+    """Renter said yes to the offered existing slot -> fold in + confirm."""
+    existing = None
+    try:
+        existing = cal.find_existing_showing(address)
+    except Exception as e:  # noqa: BLE001
+        log.error("accept_offer lookup failed: %s", e)
+    if not existing:
+        # Offered slot vanished (cancelled?) - fall back to asking for a time.
+        return send_stage(thread_id, f"reply__{message_id}", relay,
+                          T.windows_ask(first_name), [AWAITING_LABEL], [],
+                          {"template": "windows_ask_fallback"}, message_id)
+
+    event_id = existing["event"].get("id", "")
+    stage = f"booked__{event_id}"
+    if dry_run():
+        ledger.write_shadow(thread_id, stage, {
+            "would_calendar": {"fold": True, "event_id": event_id,
+                               "renter": first_name},
+            "would_body": T.booking_confirmation(
+                first_name, address, existing["when_human"], "Alex Foley"),
+        })
+        return "shadowed"
+
+    verdict = ledger.reserve_send(thread_id, stage, {"template": "booking_fold"})
+    if verdict in ("already-sent", "in-flight"):
+        return f"skipped:{verdict}"
+    if verdict == "recover":
+        msgs = gm.fetch_thread(thread_id)
+        if gm.alex_replied_after(msgs, message_id):
+            ledger.mark_sent(thread_id, stage, recovered="backfilled")
+            return "skipped:recovered"
+        if not ledger.takeover_send(thread_id, stage):
+            return "skipped:takeover-lost"
+
+    try:
+        cal.fold_renter_into_event(existing["event"], first_name)  # event FIRST
+        gm.send_reply(thread_id, relay, T.booking_confirmation(
+            first_name, address, existing["when_human"], "Alex Foley"))
+    except Exception as e:  # noqa: BLE001
+        ledger.mark_failed(thread_id, stage, str(e))
+        return "skipped:book-failed"
+    ledger.mark_sent(thread_id, stage, event_id=event_id)
+    try:
+        gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
+    except Exception as e:  # noqa: BLE001
+        ledger.set_labels_pending(thread_id, stage, [HANDLED_LABEL], [AWAITING_LABEL])
+        log.error("label failed after fold: %s", e)
+    ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
+                      booked_start_iso=existing["start_az"].isoformat(),
+                      agent="Alex Foley")
+    return "sent"
+
+
+def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
+                       message_id, now_az) -> str:
+    events = cal.list_events(10)
+    for cand in cls.get("time_candidates", []):
+        if not cand.get("date") or not cand.get("time"):
+            continue
+        try:
+            h, m = map(int, cand["time"].split(":"))
+            y, mo, d = map(int, cand["date"].split("-"))
+            start_az = datetime(y, mo, d, h, m, tzinfo=AZ_TZ)
+        except (ValueError, TypeError):
+            continue
+        if start_az < now_az:
+            continue
+        v = cal.validate_slot(start_az, address, events,
+                              bounds={"after": cand.get("after"),
+                                      "before": cand.get("before")},
+                              now_az=now_az)
+        if v.get("fold"):
+            existing = v["fold"]
+            return send_stage(
+                thread_id, f"reply__{message_id}", relay,
+                T.offer_existing(first_name, address, existing["when_human"]),
+                [AWAITING_LABEL], [], {"template": "offer_existing_p2"}, message_id)
+        if not v.get("ok"):
+            continue
+
+        agent, same_day = v["agent"], v["same_day"]
+        when_human = cal.fmt_showing_time(start_az)
+
+        if dry_run():
+            ledger.write_shadow(thread_id, f"booked__pending_{message_id}", {
+                "would_calendar": {"create": True, "start": start_az.isoformat(),
+                                   "agent": agent["name"], "same_day": same_day},
+                "would_body": T.booking_confirmation(first_name, address,
+                                                     when_human, agent["name"]),
+                "would_poke": (f"Same-day: {first_name} at "
+                               f"{address.split(',')[0]} "
+                               f"{start_az.strftime('%-I:%M %p')} TODAY - Jace "
+                               "assigned. Conflict? Reply fast.") if same_day else None,
+            })
+            return "shadowed"
+
+        stage_probe = f"reply__{message_id}"
+        verdict = ledger.reserve_send(thread_id, stage_probe,
+                                      {"template": "booking_new"})
+        if verdict in ("already-sent", "in-flight"):
+            return f"skipped:{verdict}"
+        if verdict == "recover":
+            msgs = gm.fetch_thread(thread_id)
+            if gm.alex_replied_after(msgs, message_id):
+                ledger.mark_sent(thread_id, stage_probe, recovered="backfilled")
+                return "skipped:recovered"
+            if not ledger.takeover_send(thread_id, stage_probe):
+                return "skipped:takeover-lost"
+
+        try:
+            event_id = cal.create_showing_event(address, first_name, start_az, agent)
+        except Exception as e:  # noqa: BLE001
+            ledger.mark_failed(thread_id, stage_probe, f"create_event: {e}")
+            return "skipped:event-failed"
+        try:
+            gm.send_reply(thread_id, relay, T.booking_confirmation(
+                first_name, address, when_human, agent["name"]))
+        except Exception as e:  # noqa: BLE001
+            ledger.mark_failed(thread_id, stage_probe, f"send-after-event: {e} "
+                               f"event_id={event_id}")
+            return "skipped:send-failed-event-created"
+        ledger.mark_sent(thread_id, stage_probe, event_id=event_id)
+        try:
+            gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
+        except Exception as e:  # noqa: BLE001
+            ledger.set_labels_pending(thread_id, stage_probe,
+                                      [HANDLED_LABEL], [AWAITING_LABEL])
+            log.error("label failed after booking: %s", e)
+        ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
+                          booked_start_iso=start_az.isoformat(), agent=agent["name"])
+        if same_day:
+            gm.poke_ping(f"Same-day: {first_name} at {address.split(',')[0]} "
+                         f"{start_az.strftime('%-I:%M %p')} TODAY - Jace assigned. "
+                         "Conflict? Reply fast.")
+        return "sent"
+
+    # No candidate survived validation -> counter with nearest valid slots.
+    slots = cal.counter_slots(address, events, now_az=now_az)
+    if not slots:
+        needs_human(thread_id, first_name, address, "no valid slots to counter")
+        return "no-send:needs-human"
+    return send_stage(thread_id, f"reply__{message_id}", relay,
+                      T.counter_proposal(first_name,
+                                         [cal.fmt_showing_time(s) for s in slots]),
+                      [AWAITING_LABEL], [], {"template": "counter"}, message_id)
+
+
+def handle_cancellation(thread_id, doc, first_name, relay, message_id) -> str:
+    event_id = doc.get("event_id")
+    if dry_run():
+        ledger.write_shadow(thread_id, f"reply__{message_id}", {
+            "would_calendar": {"cancel": True, "event_id": event_id},
+            "would_body": T.reschedule_after_cancel(first_name),
+        })
+        return "shadowed"
+    if event_id:
+        try:
+            cal.cancel_event(event_id)
+        except Exception as e:  # noqa: BLE001
+            log.error("cancel_event failed (continuing): %s", e)
+    result = send_stage(thread_id, f"reply__{message_id}", relay,
+                        T.reschedule_after_cancel(first_name),
+                        [AWAITING_LABEL], [HANDLED_LABEL],
+                        {"template": "reschedule"}, message_id)
+    ledger.transition(thread_id, ledger.AWAITING_TIME, event_id=None,
+                      booked_start_iso=None)
+    return result
+
+
+# ---------------------------------------------------------------- routing
+
+def route_message(thread_id: str, subject: str, sender: str, message_id: str) -> str:
+    sender_l = (sender or "").lower()
+    if gm.ALEX_EMAIL in sender_l:
+        return "skipped:self-send"
+
+    if not ledger.claim_message(message_id or f"noid-{thread_id}", thread_id):
+        return "skipped:dup-delivery"
+
+    msgs = gm.fetch_thread(thread_id)
+    if not msgs:
+        ledger.record_message_outcome(message_id, "empty-thread")
+        return "skipped:empty-thread"
+
+    renter_msg = gm.last_renter_message(msgs)
+    renter_text = gm.extract_renter_text(renter_msg) if renter_msg else ""
+
+    if renter_text and not ledger.claim_content_hash(thread_id, renter_text):
+        ledger.record_message_outcome(message_id, "dup-content")
+        return "skipped:dup-content"
+
+    if gm.alex_replied_after(msgs, message_id):
+        ledger.record_message_outcome(message_id, "already-answered")
+        return "skipped:already-answered"
+
+    doc = ledger.get_thread(thread_id)
+    first_name, address = parse_subject(subject)
+
+    if doc is None and first_name and len(msgs) <= 2 and not any(
+            gm.is_from_alex(m) for m in msgs):
+        relay = gm.relay_from_sender(sender) or gm.relay_from_thread(msgs)
+        if not relay:
+            ledger.record_message_outcome(message_id, "no-relay")
+            return "error-no-relay"
+        out = handle_new_inquiry(thread_id, first_name, address, relay,
+                                 renter_text, message_id)
+        ledger.record_message_outcome(message_id, out)
+        return out
+
+    if doc is None:
+        if not any(gm.is_from_relay(m) for m in msgs):
+            ledger.record_message_outcome(message_id, "not-zillow")
+            return "skipped:not-zillow"
+        # Legacy in-flight thread from the pre-ledger era: reconstruct.
+        name = first_name or "there"
+        addr = address or ""
+        state = ledger.BOOKED if any(
+            "you're all set" in gm.msg_body(m).lower()
+            for m in msgs if gm.is_from_alex(m)) else ledger.AWAITING_TIME
+        ledger.create_thread(thread_id, state=state, renter_name=name,
+                             property_address=addr,
+                             relay_email=gm.relay_from_thread(msgs),
+                             reconstructed=True)
+        doc = ledger.get_thread(thread_id)
+
+    if renter_msg is None or gm.msg_id(renter_msg) != (message_id or gm.msg_id(renter_msg)):
+        # The triggering message isn't the newest renter message; process the
+        # newest one (idempotency keys keep this safe).
+        pass
+
+    out = handle_reply(thread_id, doc, msgs, renter_text,
+                       message_id or gm.msg_id(renter_msg or {}) or thread_id)
+    ledger.record_message_outcome(message_id, out)
+    return out
+
+
+# ---------------------------------------------------------------- http
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, text):
@@ -448,11 +552,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(text.encode())
 
     def do_GET(self):
-        # Health check for the host
-        self._send(200, "zillow-instant-responder ok")
+        self._send(200, f"zillow-pipeline ok (dry_run={dry_run()})")
 
     def do_POST(self):
-        # Verify shared secret (header or query)
         secret = self.headers.get("X-Webhook-Secret", "")
         if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
             self._send(401, "bad secret")
@@ -461,33 +563,52 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length) if length else b"{}"
             payload = json.loads(raw or b"{}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self._send(400, f"bad json: {e}")
             return
 
         try:
-            thread_id, subject, sender, message_id = extract_event(payload)
+            if self.path.rstrip("/") == "/reprocess":
+                thread_id = payload.get("thread_id", "")
+                message_id = payload.get("message_id", "") or f"reproc-{thread_id}-{datetime.now(AZ_TZ).strftime('%Y%m%d%H%M')}"
+                if not thread_id:
+                    self._send(400, "missing thread_id")
+                    return
+                result = route_message(thread_id, payload.get("subject", ""),
+                                       payload.get("sender", ""), message_id)
+                self._send(200, result)
+                return
+
+            thread_id, subject, sender, message_id = gm.extract_event(payload)
             if not thread_id:
-                log.info("No thread_id in payload, ignoring")
                 self._send(200, "ignored-no-thread")
                 return
-            result = handle_inquiry(thread_id, subject or "", sender or "", message_id)
+            result = route_message(thread_id, subject or "", sender or "",
+                                   message_id or "")
             self._send(200, result)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             log.exception("handler error")
-            # 200 so Composio doesn't hammer retries; we logged it
             self._send(200, f"error-logged: {e}")
 
     def log_message(self, *args):
-        pass  # quiet default access logs; we use our own logger
+        pass
 
 
 def main():
-    missing = [k for k in ("COMPOSIO_API_KEY", "COMPOSIO_CONNECTED_ACCOUNT_ID") if not os.environ.get(k)]
+    missing = [k for k in ("COMPOSIO_API_KEY", "COMPOSIO_CONNECTED_ACCOUNT_ID")
+               if not os.environ.get(k)]
     if missing:
-        log.warning("Missing env vars: %s (service will start but calls will fail)", ", ".join(missing))
-    log.info("Zillow instant responder listening on :%s", PORT)
-    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+        log.warning("Missing env vars: %s", ", ".join(missing))
+    # Ledger init failure must not crash-loop the service. Without a ledger the
+    # pipeline FAILS CLOSED per-request (claim_message raises -> no send ever),
+    # which is the safe direction; health stays up so the deploy is debuggable.
+    try:
+        ledger.init_db()
+        cron.start_ticker()
+    except Exception as e:  # noqa: BLE001
+        log.error("LEDGER INIT FAILED - serving fail-closed, fix credentials: %s", e)
+    log.info("Zillow pipeline v2 listening on :%s (dry_run=%s)", PORT, dry_run())
+    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 
 if __name__ == "__main__":

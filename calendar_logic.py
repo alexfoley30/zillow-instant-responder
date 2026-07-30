@@ -1,0 +1,224 @@
+"""Calendar operations + the deterministic slot engine.
+
+Everything renter-affecting here is called with the send lock already held by
+the caller (responder.py). Booking order is fixed: validate -> create/fold
+event -> confirmation send -> labels (the ATOMIC BOOKING TRIPWIRE).
+"""
+
+import logging
+from datetime import datetime, timedelta, timezone
+
+import rules
+from gmail_client import composio_execute
+
+log = logging.getLogger("zillow-instant.calendar")
+
+AZ_TZ = rules.AZ_TZ
+
+
+def _iso_utc(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def list_events(days: int = 7, time_min: datetime = None) -> list:
+    now = time_min or datetime.now(timezone.utc)
+    res = composio_execute("GOOGLECALENDAR_EVENTS_LIST", {
+        "calendarId": "primary",
+        "timeMin": _iso_utc(now),
+        "timeMax": _iso_utc(now + timedelta(days=days)),
+        "singleEvents": True,
+        "orderBy": "startTime",
+        "maxResults": 100,
+    })
+    data = res.get("data", res)
+    items = data.get("items") or data.get("events") or []
+    if isinstance(data, dict) and not items and isinstance(data.get("event_data"), dict):
+        items = data["event_data"].get("event_data", []) or []
+    return [ev for ev in items if isinstance(ev, dict)]
+
+
+def _ev_text(ev: dict) -> str:
+    return " ".join([str(ev.get("summary", "")), str(ev.get("location", "")),
+                     str(ev.get("description", ""))]).lower()
+
+
+def _ev_start(ev: dict) -> datetime | None:
+    raw = (ev.get("start") or {}).get("dateTime")
+    if not raw:
+        return None  # all-day events aren't showings
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _ev_end(ev: dict) -> datetime | None:
+    raw = (ev.get("end") or {}).get("dateTime")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def fmt_showing_time(start_az: datetime) -> str:
+    """'Wednesday, July 8, at 6:30 PM' with today/tomorrow prefix when true."""
+    now_az = datetime.now(AZ_TZ)
+    day = start_az.strftime("%A, %B %-d")
+    if start_az.date() == now_az.date():
+        day = f"today, {day}"
+    elif start_az.date() == (now_az + timedelta(days=1)).date():
+        day = f"tomorrow, {day}"
+    return f"{day}, at {start_az.strftime('%-I:%M %p')}"
+
+
+def find_existing_showing(address: str, events: list = None,
+                          min_lead_hours: float = 2.0) -> dict | None:
+    """CONSOLIDATE FIRST: upcoming showing at THIS house (same street number +
+    name core, 'showing'/'open house' in text). Returns {event, start_az,
+    when_human} or None."""
+    try:
+        events = events if events is not None else list_events(7)
+    except Exception as e:  # noqa: BLE001
+        log.error("find_existing_showing list failed for %r: %s", address, e)
+        return None
+    for ev in events:
+        hay = _ev_text(ev)
+        if not rules.same_property(address, hay):
+            continue
+        if "showing" not in hay and "open house" not in hay:
+            continue
+        start = _ev_start(ev)
+        if not start:
+            continue
+        if start < datetime.now(timezone.utc) + timedelta(hours=min_lead_hours):
+            continue
+        start_az = start.astimezone(AZ_TZ)
+        return {"event": ev, "start_az": start_az,
+                "when_human": fmt_showing_time(start_az)}
+    return None
+
+
+def validate_slot(start_az: datetime, address: str, events: list,
+                  bounds: dict = None, now_az: datetime = None) -> dict:
+    """Deterministic validation of one candidate slot.
+    Returns {"ok": True, "agent": {...}, "same_day": bool} or
+    {"ok": False, "reason": str, "fold": {...}|None}.
+
+    Same-day candidates book with Jace and skip Alex-calendar overlap and
+    drive-time checks (his calendar is not visible); the only blocker is an
+    existing event at the SAME property (fold instead) and the away-block.
+    """
+    now_az = now_az or datetime.now(AZ_TZ)
+    bounds = bounds or {}
+
+    if not rules.in_window(start_az):
+        return {"ok": False, "reason": "out-of-window", "fold": None}
+    if not rules.min_notice_ok(start_az, now_az):
+        return {"ok": False, "reason": "too-soon", "fold": None}
+    if not rules.respects_renter_bounds(start_az, bounds.get("after"), bounds.get("before")):
+        return {"ok": False, "reason": "violates-renter-bounds", "fold": None}
+
+    day_events = [ev for ev in events
+                  if (_ev_start(ev) or datetime.min.replace(tzinfo=timezone.utc))
+                  .astimezone(AZ_TZ).date() == start_az.date()]
+
+    # Away block applies to every candidate day.
+    status = rules.away_block_status(rules.away_events(day_events, start_az.date()))
+    if status == "blocked":
+        return {"ok": False, "reason": "away-blocked", "fold": None}
+
+    # Existing showing at the same house always wins -> fold, never double-book.
+    existing = find_existing_showing(address, events=day_events, min_lead_hours=0)
+    if existing and abs((existing["start_az"] - start_az).total_seconds()) < 3600 * 6:
+        return {"ok": False, "reason": "same-house-slot-exists", "fold": existing}
+
+    same_day = rules.is_same_day(start_az, now_az)
+    agent = rules.pick_agent(start_az, now_az)
+    if status == "alex-away" and agent["email"] == rules.ALEX["email"]:
+        agent = rules.JACE  # Jace/Rhett not on the away event -> Jace covers
+
+    if not same_day and agent["email"] == rules.ALEX["email"]:
+        end_az = start_az + timedelta(minutes=rules.SHOWING_MINUTES)
+        for ev in day_events:
+            s, e = _ev_start(ev), _ev_end(ev)
+            if not s or not e:
+                continue
+            s_az, e_az = s.astimezone(AZ_TZ), e.astimezone(AZ_TZ)
+            if s_az < end_az and start_az < e_az:
+                return {"ok": False, "reason": "conflict", "fold": None}
+            ev_addr = str(ev.get("location", "")) or str(ev.get("summary", ""))
+            if not rules.same_property(address, _ev_text(ev)) and ev_addr.strip():
+                gap = rules.drive_gap_minutes(address, ev_addr)
+                if s_az >= end_az and (s_az - end_az) < timedelta(minutes=gap):
+                    return {"ok": False, "reason": "drive-gap", "fold": None}
+                if e_az <= start_az and (start_az - e_az) < timedelta(minutes=gap):
+                    return {"ok": False, "reason": "drive-gap", "fold": None}
+
+    return {"ok": True, "agent": agent, "same_day": same_day}
+
+
+def counter_slots(address: str, events: list, now_az: datetime = None,
+                  count: int = 2) -> list:
+    """Earliest valid exact slots for Template 4 - same-day first by design."""
+    now_az = now_az or datetime.now(AZ_TZ)
+
+    def free(dt):
+        return validate_slot(dt, address, events, now_az=now_az).get("ok", False)
+
+    return rules.next_valid_slots(now_az, count=count, is_free=free)
+
+
+# ---------------------------------------------------------------- writes
+
+def create_showing_event(address: str, first_name: str, start_az: datetime,
+                         agent: dict) -> str:
+    """Create the 30-minute showing event. Returns the event id."""
+    end_az = start_az + timedelta(minutes=rules.SHOWING_MINUTES)
+    attendees = {rules.ALEX["email"], agent["email"], rules.BRIANNA_VIEWER}
+    res = composio_execute("GOOGLECALENDAR_CREATE_EVENT", {
+        "calendarId": "primary",
+        "summary": f"Showing — {address.split(',')[0].strip()} with {first_name}",
+        "location": address,
+        "description": (f"Zillow inquiry. Inquirer: {first_name}. "
+                        f"Agent: {agent['name']} ({agent['email']})."),
+        "start_datetime": start_az.strftime("%Y-%m-%dT%H:%M:%S"),
+        "event_duration_minutes": rules.SHOWING_MINUTES,
+        "timezone": "America/Phoenix",
+        "attendees": sorted(attendees),
+        "send_updates": True,
+    })
+    data = res.get("data", res)
+    ev = data.get("response_data") or data.get("event") or data
+    event_id = (ev or {}).get("id") or ""
+    if not event_id:
+        raise RuntimeError(f"create_event returned no id: {str(res)[:200]}")
+    return event_id
+
+
+def fold_renter_into_event(event: dict, first_name: str) -> str:
+    """Clustering: append the renter to the existing event's description.
+    NEVER creates a second event. Returns the event id."""
+    event_id = event.get("id", "")
+    desc = str(event.get("description", "")).rstrip(". \n")
+    if first_name.lower() in desc.lower():
+        return event_id  # already folded (idempotent)
+    if "Inquirer:" in desc:
+        new_desc = desc + f", {first_name}."
+    else:
+        new_desc = (desc + f"\nInquirer: {first_name}.").strip()
+    composio_execute("GOOGLECALENDAR_UPDATE_EVENT", {
+        "calendarId": "primary",
+        "event_id": event_id,
+        "description": new_desc,
+        "send_updates": True,
+    })
+    return event_id
+
+
+def cancel_event(event_id: str):
+    composio_execute("GOOGLECALENDAR_DELETE_EVENT", {
+        "calendarId": "primary",
+        "event_id": event_id,
+    })

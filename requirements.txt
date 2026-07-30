@@ -1,1 +1,2 @@
-# No external dependencies — responder.py uses only the Python standard library.
+firebase-admin>=7.0.0
+anthropic>=0.116.0
