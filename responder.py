@@ -52,6 +52,9 @@ log = logging.getLogger("zillow-instant")
 AZ_TZ = ZoneInfo("America/Phoenix")
 PORT = int(os.environ.get("PORT", "8080"))
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+# Auth for the watchdog's /reprocess endpoint (separate from the Composio
+# webhook secret so the two can rotate independently).
+REPROCESS_SECRET = os.environ.get("REPROCESS_SECRET", "") or WEBHOOK_SECRET
 AWAITING_LABEL = os.environ.get("AWAITING_RENTER_LABEL_ID", "")
 HANDLED_LABEL = os.environ.get("HANDLED_LABEL_ID", "")
 NEEDS_REPLY_LABEL = os.environ.get("NEEDS_REPLY_LABEL_ID", "Label_2252577853408309931")
@@ -556,7 +559,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         secret = self.headers.get("X-Webhook-Secret", "")
-        if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
+        required = REPROCESS_SECRET if self.path.rstrip("/") == "/reprocess" else WEBHOOK_SECRET
+        if required and secret != required:
             self._send(401, "bad secret")
             return
         try:
