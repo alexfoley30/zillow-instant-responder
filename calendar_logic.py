@@ -139,6 +139,11 @@ def validate_slot(start_az: datetime, address: str, events: list,
     if status == "alex-away" and agent["email"] == rules.ALEX["email"]:
         agent = rules.JACE  # Jace/Rhett not on the away event -> Jace covers
 
+    # AGENT FALLBACK (2026-07-30, Kim/New Town): a valid requested time never
+    # bounces because Alex is busy - it books with Jace instead. Counters are
+    # reserved for times that are themselves invalid (window/notice/bounds/
+    # away-block), handled above.
+    jace_cover = None
     if not same_day and agent["email"] == rules.ALEX["email"]:
         end_az = start_az + timedelta(minutes=rules.SHOWING_MINUTES)
         for ev in day_events:
@@ -147,16 +152,17 @@ def validate_slot(start_az: datetime, address: str, events: list,
                 continue
             s_az, e_az = s.astimezone(AZ_TZ), e.astimezone(AZ_TZ)
             if s_az < end_az and start_az < e_az:
-                return {"ok": False, "reason": "conflict", "fold": None}
+                agent, jace_cover = rules.JACE, "alex-conflict"
+                break
             ev_addr = str(ev.get("location", "")) or str(ev.get("summary", ""))
             if not rules.same_property(address, _ev_text(ev)) and ev_addr.strip():
                 gap = rules.drive_gap_minutes(address, ev_addr)
-                if s_az >= end_az and (s_az - end_az) < timedelta(minutes=gap):
-                    return {"ok": False, "reason": "drive-gap", "fold": None}
-                if e_az <= start_az and (start_az - e_az) < timedelta(minutes=gap):
-                    return {"ok": False, "reason": "drive-gap", "fold": None}
+                if (s_az >= end_az and (s_az - end_az) < timedelta(minutes=gap)) or \
+                   (e_az <= start_az and (start_az - e_az) < timedelta(minutes=gap)):
+                    agent, jace_cover = rules.JACE, "drive-gap"
+                    break
 
-    return {"ok": True, "agent": agent, "same_day": same_day}
+    return {"ok": True, "agent": agent, "same_day": same_day, "jace_cover": jace_cover}
 
 
 def counter_slots(address: str, events: list, now_az: datetime = None,

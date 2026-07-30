@@ -390,18 +390,23 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
             continue
 
         agent, same_day = v["agent"], v["same_day"]
+        jace_cover = v.get("jace_cover")
         when_human = cal.fmt_showing_time(start_az)
+        jace_ping = None
+        if same_day or jace_cover:
+            reason = "same-day" if same_day else "Alex booked"
+            jace_ping = (f"Jace assigned: {first_name} at {address.split(',')[0]} "
+                         f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - {reason}. "
+                         "Conflict? Reply fast.")
 
         if dry_run():
             ledger.write_shadow(thread_id, f"booked__pending_{message_id}", {
                 "would_calendar": {"create": True, "start": start_az.isoformat(),
-                                   "agent": agent["name"], "same_day": same_day},
+                                   "agent": agent["name"], "same_day": same_day,
+                                   "jace_cover": jace_cover},
                 "would_body": T.booking_confirmation(first_name, address,
                                                      when_human, agent["name"]),
-                "would_poke": (f"Same-day: {first_name} at "
-                               f"{address.split(',')[0]} "
-                               f"{start_az.strftime('%-I:%M %p')} TODAY - Jace "
-                               "assigned. Conflict? Reply fast.") if same_day else None,
+                "would_poke": jace_ping,
             })
             return "shadowed"
 
@@ -439,10 +444,8 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
             log.error("label failed after booking: %s", e)
         ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
                           booked_start_iso=start_az.isoformat(), agent=agent["name"])
-        if same_day:
-            gm.poke_ping(f"Same-day: {first_name} at {address.split(',')[0]} "
-                         f"{start_az.strftime('%-I:%M %p')} TODAY - Jace assigned. "
-                         "Conflict? Reply fast.")
+        if jace_ping:
+            gm.poke_ping(jace_ping)
         return "sent"
 
     # No candidate survived validation -> counter with nearest valid slots.
