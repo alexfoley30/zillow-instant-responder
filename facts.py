@@ -18,10 +18,12 @@ _RULES = [
     ("apply_first", re.compile(
         r"(lower the (rent|price)|negotiat|take \$|accept \$|come down on|"
         r"any flexibility on (the )?(rent|price)|rent negotiable)", re.IGNORECASE)),
-    # modifications: as-is
+    # modifications: as-is. Word boundaries matter: an unanchored "add" matched
+    # inside "address"/"additional" in relay boilerplate and misfired on 8 of 12
+    # new inquiries during the 7/30-8/1 shadow soak.
     ("as_is", re.compile(
-        r"(install|add|put in|replace|swap|change out|paint|turf|fence in|"
-        r"can you (fix|update|upgrade))", re.IGNORECASE)),
+        r"\b(install|add|put in|replace|swap|change out|paint|turf|fence in)\b|"
+        r"can you (fix|update|upgrade)", re.IGNORECASE)),
     # appliances: always included on Alex listings
     ("appliances", re.compile(
         r"(washer|dryer|fridge|refrigerator|appliances (included|come with)|"
@@ -35,6 +37,20 @@ _RULES = [
 
 APPLIANCES_LINE = ("Yes, the refrigerator, washer, and dryer are all included "
                    "with the home.")
+
+# Short inline answers for merging into the FIRST reply (one send per inquiry,
+# never a second standing-rule email - shadow soak 7/30-8/1 caught the double).
+ANSWER_LINES = {
+    "as_is": ("Good question - the home is offered just as you see it, so we "
+              "aren't able to make changes or additions."),
+    "floor_plan": ("On the floor plan - we don't have one available to send, "
+                   "but you're welcome to come see the layout in person."),
+    "appliances": APPLIANCES_LINE,
+    "fair_housing": ("On your question - I have to stick to details about the "
+                     "property itself, but I'm happy to tell you all about the home."),
+    "apply_first": ("On pricing - the best first step is getting an application "
+                    "in; the owner reviews offers from applicants."),
+}
 
 
 def standing_rule_for(question_text: str) -> str | None:

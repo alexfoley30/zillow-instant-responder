@@ -22,6 +22,7 @@ FACTS_DIR = os.path.expanduser(
 BLOCKED_ADDRESSES = [
     "3309 E San Remo Ave",   # Gilbert 85234 - leased 2026-07-04
     "8743 E Palo Verde Dr",  # Scottsdale 85250 - leased 2026-07-08
+    "22500 N Greenland Park Dr",  # Maricopa 85139 - leased 2026-08-01
 ]
 
 

@@ -25,11 +25,19 @@ QUESTION_ACK = (
 )
 
 
-def availability_ask(first_name, address, ack=False):
+def _lead_block(ack, answer):
+    """One optional lead-in: a direct standing-rule answer beats the generic
+    ack; never both, never a separate second email."""
+    if answer:
+        return answer + "\n\n"
+    return QUESTION_ACK if ack else ""
+
+
+def availability_ask(first_name, address, ack=False, answer=None):
     """Template 1 - first reply when no showing exists at the house."""
     return (
         f"Hi {first_name},\n\n"
-        + (QUESTION_ACK if ack else "")
+        + _lead_block(ack, answer)
         + f"Thanks for reaching out about {address}! I'd love to get you in to see it.\n\n"
         "When are you hoping to move, and what day and time works to come take a look? "
         "Here's when I have open this week (Phoenix time):\n\n"
@@ -42,11 +50,11 @@ def availability_ask(first_name, address, ack=False):
     )
 
 
-def offer_existing(first_name, address, when_human, ack=False):
+def offer_existing(first_name, address, when_human, ack=False, answer=None):
     """Template OE - consolidate-first: the house already has a showing."""
     return (
         f"Hi {first_name},\n\n"
-        + (QUESTION_ACK if ack else "")
+        + _lead_block(ack, answer)
         + f"Thanks for reaching out about {address}! Great timing, we actually have "
         f"a showing already lined up there on {when_human} (Arizona time). "
         "Any chance you could make that one? I can add you right in.\n\n"

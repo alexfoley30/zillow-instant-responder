@@ -163,34 +163,48 @@ def handle_new_inquiry(thread_id: str, first_name: str, address: str,
                           T.leased_reply(first_name, address),
                           [HANDLED_LABEL], [], {"template": "leased"}, message_id)
 
-    has_q = "?" in (renter_text or "")
+    # ONE send per inquiry, always (shadow soak 7/30-8/1 caught the double:
+    # first_reply + a separate standing-rule email 68ms apart on 8 threads).
+    # A matched standing rule answers INLINE in the first reply; an unmatched
+    # question gets the ack line INLINE + a needs-you escalation. URL query
+    # strings carry "?" so strip links before question detection.
+    clean = re.sub(r"https?://\S+", "", renter_text or "")
+    has_q = "?" in clean
+    rule = facts.standing_rule_for(renter_text) if has_q else None
+    answer = facts.ANSWER_LINES.get(rule) if rule else None
+
     existing = None
     try:
         existing = cal.find_existing_showing(address)
     except Exception as e:  # noqa: BLE001 - never block the instant reply
         log.error("consolidate-first lookup failed: %s", e)
 
+    ack = has_q and not answer
     if existing:
-        body = T.offer_existing(first_name, address, existing["when_human"], ack=has_q)
+        body = T.offer_existing(first_name, address, existing["when_human"],
+                                ack=ack, answer=answer)
         state, template = ledger.OFFERED, "offer_existing"
         offered_iso = existing["start_az"].isoformat()
         offered_event = existing["event"].get("id", "")
     else:
-        body = T.availability_ask(first_name, address, ack=has_q)
+        body = T.availability_ask(first_name, address, ack=ack, answer=answer)
         state, template = ledger.ACKED, "availability_ask"
         offered_iso, offered_event = None, ""
 
+    if answer:
+        template += f"+{rule}"
+
     ledger.create_thread(
         thread_id, state=state, renter_name=first_name, property_address=address,
-        relay_email=relay, has_open_question=has_q,
+        relay_email=relay, has_open_question=ack,
         offered_start_iso=offered_iso, offered_event_id=offered_event)
 
-    labels = [AWAITING_LABEL] + ([NEEDS_REPLY_LABEL] if has_q else [])
+    labels = [AWAITING_LABEL] + ([NEEDS_REPLY_LABEL] if ack else [])
     result = send_stage(thread_id, "first_reply", relay, body, labels, [],
                         {"template": template}, message_id)
-    if has_q and result in ("sent", "shadowed"):
-        # The question itself still needs an answer - route it now.
-        route_question(thread_id, first_name, address, relay, renter_text, message_id)
+    if ack and result in ("sent", "shadowed"):
+        # We promised a follow-up in the ack line - Alex must supply it.
+        needs_human(thread_id, first_name, address, renter_text[:120])
     return result
 
 
@@ -364,7 +378,16 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
 
 def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                        message_id, now_az) -> str:
-    events = cal.list_events(10)
+    # Calendar read failing here used to kill the whole handler AFTER the
+    # "classified" outcome was recorded - Andrea's propose_time vanished
+    # without a trace in the 7/30-8/1 shadow. Fail loud and safe instead.
+    try:
+        events = cal.list_events(10)
+    except Exception as e:  # noqa: BLE001
+        log.error("book_proposed_time list_events failed: %s", e)
+        needs_human(thread_id, first_name, address,
+                    f"calendar unavailable while booking: {str(e)[:80]}")
+        return "no-send:calendar-error"
     for cand in cls.get("time_candidates", []):
         if not cand.get("date") or not cand.get("time"):
             continue
@@ -449,7 +472,11 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         return "sent"
 
     # No candidate survived validation -> counter with nearest valid slots.
-    slots = cal.counter_slots(address, events, now_az=now_az)
+    try:
+        slots = cal.counter_slots(address, events, now_az=now_az)
+    except Exception as e:  # noqa: BLE001
+        log.error("counter_slots failed: %s", e)
+        slots = []
     if not slots:
         needs_human(thread_id, first_name, address, "no valid slots to counter")
         return "no-send:needs-human"
@@ -516,9 +543,17 @@ def route_message(thread_id: str, subject: str, sender: str, message_id: str) ->
         if not relay:
             ledger.record_message_outcome(message_id, "no-relay")
             return "error-no-relay"
-        out = handle_new_inquiry(thread_id, first_name, address, relay,
-                                 renter_text, message_id)
-        ledger.record_message_outcome(message_id, out)
+        try:
+            out = handle_new_inquiry(thread_id, first_name, address, relay,
+                                     renter_text, message_id)
+        except Exception as e:  # noqa: BLE001
+            log.exception("handle_new_inquiry crashed on %s", thread_id)
+            ledger.record_message_outcome(
+                message_id, f"error:{type(e).__name__}",
+                extra={"error": str(e)[:300], "renter_text": renter_text[:200]})
+            return f"error:{type(e).__name__}"
+        ledger.record_message_outcome(message_id, out,
+                                      extra={"renter_text": renter_text[:200]})
         return out
 
     if doc is None:
@@ -542,9 +577,17 @@ def route_message(thread_id: str, subject: str, sender: str, message_id: str) ->
         # newest one (idempotency keys keep this safe).
         pass
 
-    out = handle_reply(thread_id, doc, msgs, renter_text,
-                       message_id or gm.msg_id(renter_msg or {}) or thread_id)
-    ledger.record_message_outcome(message_id, out)
+    try:
+        out = handle_reply(thread_id, doc, msgs, renter_text,
+                           message_id or gm.msg_id(renter_msg or {}) or thread_id)
+    except Exception as e:  # noqa: BLE001
+        log.exception("handle_reply crashed on %s", thread_id)
+        ledger.record_message_outcome(
+            message_id, f"error:{type(e).__name__}",
+            extra={"error": str(e)[:300], "renter_text": renter_text[:200]})
+        return f"error:{type(e).__name__}"
+    ledger.record_message_outcome(message_id, out,
+                                  extra={"renter_text": renter_text[:200]})
     return out
 
 

@@ -91,11 +91,14 @@ def claim_message(message_id: str, thread_id: str) -> bool:
         return False
 
 
-def record_message_outcome(message_id: str, outcome: str, classification: dict = None):
+def record_message_outcome(message_id: str, outcome: str, classification: dict = None,
+                           extra: dict = None):
     db = init_db()
     patch = {"outcome": outcome}
     if classification is not None:
         patch["classification"] = classification
+    if extra:
+        patch.update(extra)
     db.collection("zillow_messages").document(message_id).set(patch, merge=True)
 
 

@@ -114,30 +114,46 @@ _CHROME_RE = re.compile(
     r"(Have questions or need help|Fair Housing|zillow\.com|unsubscribe|"
     r"This email was sent|View listing)", re.IGNORECASE)
 
+# Reply-relay chrome markers. Renter text sits BEFORE these, and the plaintext
+# body often arrives as ONE long line, so this must cut INLINE, not per-line.
+# (Shadow soak 7/30-8/1: Monica's "6:30pm tomorrow is good" classified as
+# intent=other because the extract carried 30 lines of this junk to Haiku.)
+_CUT_RE = re.compile(
+    r"(Brand logo|New message from a renter|Regarding your listing|"
+    r"Reply on Zillow|rental inquiries may be scams|Reply to \w+ Send application|"
+    r"Send application|You can also reply|Have questions or need help|"
+    r"Fair Housing|unsubscribe|This email was sent|View listing)",
+    re.IGNORECASE)
+
 
 def extract_renter_text(m: dict) -> str:
     """Best-effort extraction of the renter's own words from a relay message.
-    Reply emails often carry the text at the top before quoted history."""
+    First-inquiry format: text sits after '<Name> says:'. Reply format: text
+    sits at the very top, before the relay chrome ('Brand logo New message
+    from a renter ...') and any quoted history."""
     body = msg_body(m)
     hit = RENTER_SAYS_RE.search(body)
     if hit:
-        return hit.group("msg").strip()
-    # Fallback: take lines before the first quoted-history marker or chrome.
+        text = hit.group("msg")
+    else:
+        cut = _CUT_RE.search(body)
+        text = body[:cut.start()] if cut else body
+    # Strip quoted history + leftover chrome lines.
     lines = []
-    for line in body.splitlines():
+    for line in text.splitlines():
         s = line.strip()
         if not s:
             if lines:
                 lines.append("")
             continue
-        if s.startswith(">") or s.startswith("On ") and s.endswith("wrote:"):
+        if s.startswith(">") or (s.startswith("On ") and s.endswith("wrote:")):
             break
         if _CHROME_RE.search(s):
             break
         lines.append(s)
         if len(lines) > 30:
             break
-    return "\n".join(lines).strip()
+    return "\n".join(lines).strip()[:800]
 
 
 RELAY_RE = re.compile(r"<([^>]+@[^>]+)>")
