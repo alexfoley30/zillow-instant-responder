@@ -276,6 +276,16 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
     state = doc.get("state", ledger.AWAITING_TIME)
 
     if intent == "cancellation":
+        # "Cancellation" only means something when a showing exists. Without a
+        # booking it is a decline ("will only be there 3 mos - thnx"), and the
+        # reschedule ask reads tone-deaf - first live send 2026-08-04 (Kathy).
+        if not doc.get("event_id") and state != ledger.BOOKED:
+            try:
+                gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
+            except Exception as e:  # noqa: BLE001
+                log.error("decline relabel failed: %s", e)
+            ledger.transition(thread_id, ledger.CLOSED)
+            return "no-send:decline"
         return handle_cancellation(thread_id, doc, first_name, relay, message_id)
 
     if state == ledger.LEASED:
