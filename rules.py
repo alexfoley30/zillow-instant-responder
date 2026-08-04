@@ -80,9 +80,13 @@ def is_blocked_address(address: str, blocked_list: list) -> bool:
 
 def in_window(start_az: datetime) -> bool:
     lo, hi = SHOWING_WINDOWS[start_az.weekday()]
-    end = (start_az + timedelta(minutes=SHOWING_MINUTES)).time()
+    end_dt = start_az + timedelta(minutes=SHOWING_MINUTES)
+    # A slot that crosses midnight wrapped .time() to 00:00 and passed the
+    # close check - 11:30 PM counted as "in window" (round-2 shadow, Lyndsey).
+    if end_dt.date() != start_az.date():
+        return False
     # start inside window and the 30-min slot must end by window close
-    return lo <= start_az.time() and end <= hi
+    return lo <= start_az.time() and end_dt.time() <= hi
 
 
 def min_notice_ok(start_az: datetime, now_az: datetime) -> bool:
