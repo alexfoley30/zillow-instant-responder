@@ -271,7 +271,8 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
     if not relay:
         return "error-no-relay"
     if doc.get("alex_owned"):
-        return "skipped:alex-owned"
+        return handle_alex_owned_reply(thread_id, doc, msgs, renter_text,
+                                       message_id)
 
     last_alex = next((gm.msg_body(m) for m in reversed(msgs) if gm.is_from_alex(m)), "")
     now_az = datetime.now(AZ_TZ)
@@ -527,6 +528,45 @@ def handle_cancellation(thread_id, doc, first_name, relay, message_id) -> str:
     ledger.transition(thread_id, ledger.AWAITING_TIME, event_id=None,
                       booked_start_iso=None)
     return result
+
+
+def handle_alex_owned_reply(thread_id, doc, msgs, renter_text, message_id) -> str:
+    """Alex runs this conversation - the service never sends here. But a
+    cancellation of a booked showing is time-critical (someone will drive
+    out), so the calendar clears immediately and Alex gets a needs-you ping;
+    his Poke reply becomes the why/reschedule message via /send-approved.
+    Protocol set by Alex 2026-08-05 after Natalie/Apricot canceled into
+    silence: cancel calendar first, ask why, nudge to reschedule."""
+    event_id = doc.get("event_id")
+    if not event_id and doc.get("state") != ledger.BOOKED:
+        return "skipped:alex-owned"
+    last_alex = next((gm.msg_body(m) for m in reversed(msgs) if gm.is_from_alex(m)), "")
+    cls = llm.classify_reply(renter_text, last_alex, datetime.now(AZ_TZ))
+    if cls["intent"] != "cancellation":
+        return "skipped:alex-owned"
+    ledger.record_message_outcome(message_id, "classified", cls)
+    if dry_run():
+        ledger.write_shadow(thread_id, f"reply__{message_id}", {
+            "would_calendar": {"cancel": True, "event_id": event_id},
+            "would_poke": "alex-owned cancellation",
+        })
+        return "shadowed"
+    if event_id:
+        try:
+            cal.cancel_event(event_id)
+        except Exception as e:  # noqa: BLE001
+            log.error("cancel_event failed (continuing): %s", e)
+    try:
+        gm.modify_labels(thread_id, [NEEDS_REPLY_LABEL], [HANDLED_LABEL])
+    except Exception as e:  # noqa: BLE001
+        log.error("cancel relabel failed: %s", e)
+    ledger.transition(thread_id, ledger.AWAITING_TIME, event_id=None,
+                      booked_start_iso=None)
+    needs_human(thread_id, doc.get("renter_name") or "the renter",
+                doc.get("property_address") or "the property",
+                "canceled the booked showing - calendar cleared. Reply with "
+                "your message to them (ask why, offer a new time)")
+    return "no-send:alex-owned-cancel"
 
 
 # ---------------------------------------------------------------- routing

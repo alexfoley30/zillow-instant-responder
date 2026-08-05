@@ -122,12 +122,17 @@ def leased_reply(first_name, address):
 
 
 def reschedule_after_cancel(first_name):
+    # Protocol (Alex 2026-08-05): calendar cleared first, then ask WHY they
+    # canceled, then invite a rebook - the why tells us if the lead is dead.
     return (
         f"Hi {first_name},\n\n"
-        "No problem at all, thanks for the heads up! When would be a better "
-        "time for you? Here's what I have open (Phoenix time):\n\n"
+        "No problem at all, thanks for the heads up! I've taken it off the "
+        "calendar.\n\n"
+        "Was it just a timing thing, or did something change on your end? "
+        "If you'd still like to see the home, send me a day and time that "
+        "works and I'll get you rebooked. Here's what I have open "
+        "(Phoenix time):\n\n"
         f"{WINDOWS_BLOCK}\n"
-        "Send me a time and I'll get you rebooked.\n\n"
         f"{SIGNATURE}"
     )
 
