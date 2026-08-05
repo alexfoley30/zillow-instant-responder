@@ -220,6 +220,8 @@ def route_question(thread_id: str, first_name: str, address: str, relay: str,
         body = T.as_is_reply(first_name)
     elif rule == "appliances":
         body = T.fact_answer(first_name, facts.APPLIANCES_LINE)
+    elif rule == "requirements":
+        body = T.fact_answer(first_name, facts.REQUIREMENTS_LINE)
     elif rule == "fair_housing":
         body = T.fair_housing_steer(first_name)
     elif rule == "apply_first":

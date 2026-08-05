@@ -24,6 +24,10 @@ _RULES = [
     ("as_is", re.compile(
         r"\b(install|add|put in|replace|swap|change out|paint|turf|fence in)\b|"
         r"can you (fix|update|upgrade)", re.IGNORECASE)),
+    # approval requirements: blanket 3x-income answer (Alex 2026-08-05, Daliana)
+    ("requirements", re.compile(
+        r"\b(requirements?( to (get )?approved)?|qualifications?|qualify|"
+        r"get approved|approval process|income requirement)\b", re.IGNORECASE)),
     # appliances: always included on Alex listings
     ("appliances", re.compile(
         r"(washer|dryer|fridge|refrigerator|appliances (included|come with)|"
@@ -38,6 +42,10 @@ _RULES = [
 APPLIANCES_LINE = ("Yes, the refrigerator, washer, and dryer are all included "
                    "with the home.")
 
+REQUIREMENTS_LINE = ("The main thing we look for is income of roughly 3x the "
+                     "monthly rent, and the exact move-in requirements come "
+                     "together through the application itself.")
+
 # Short inline answers for merging into the FIRST reply (one send per inquiry,
 # never a second standing-rule email - shadow soak 7/30-8/1 caught the double).
 ANSWER_LINES = {
@@ -46,6 +54,7 @@ ANSWER_LINES = {
     "floor_plan": ("On the floor plan - we don't have one available to send, "
                    "but you're welcome to come see the layout in person."),
     "appliances": APPLIANCES_LINE,
+    "requirements": REQUIREMENTS_LINE,
     "fair_housing": ("On your question - I have to stick to details about the "
                      "property itself, but I'm happy to tell you all about the home."),
     "apply_first": ("On pricing - the best first step is getting an application "
