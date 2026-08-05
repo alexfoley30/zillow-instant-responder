@@ -30,6 +30,11 @@ _RULES = [
         r"get approved|approval process|income requirement|"
         r"(bad|poor|low|not( so)? good|good income but).{0,20}credit|"
         r"credit (score|check|isn.?t|not))\b", re.IGNORECASE)),
+    # virtual tours: never live - video walkthrough by text (Alex 2026-08-05)
+    ("virtual_tour", re.compile(
+        r"(virtual (tour|showing|walk.?through)|video (tour|call|chat|walk.?through)|"
+        r"facetime|face time|live tour|tour (over|by) (video|phone)|"
+        r"see it virtually|remote (tour|showing))", re.IGNORECASE)),
     # appliances: always included on Alex listings
     ("appliances", re.compile(
         r"(washer|dryer|fridge|refrigerator|appliances (included|come with)|"
@@ -43,6 +48,10 @@ _RULES = [
 
 APPLIANCES_LINE = ("Yes, the refrigerator, washer, and dryer are all included "
                    "with the home.")
+
+VIRTUAL_TOUR_LINE = ("We don't do live virtual tours, but I have a video "
+                     "walkthrough of the home I can text you - what's the best "
+                     "phone number to send it to?")
 
 REQUIREMENTS_LINE = ("The main thing we look for is income of roughly 3x the "
                      "monthly rent - beyond that, credit isn't an automatic "
@@ -58,6 +67,7 @@ ANSWER_LINES = {
                    "but you're welcome to come see the layout in person."),
     "appliances": APPLIANCES_LINE,
     "requirements": REQUIREMENTS_LINE,
+    "virtual_tour": VIRTUAL_TOUR_LINE,
     "fair_housing": ("On your question - I have to stick to details about the "
                      "property itself, but I'm happy to tell you all about the home."),
     "apply_first": ("On pricing - the best first step is getting an application "
