@@ -344,10 +344,13 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
     except Exception as e:  # noqa: BLE001
         log.error("accept_offer lookup failed: %s", e)
     if not existing:
-        # Offered slot vanished (cancelled?) - fall back to asking for a time.
-        return send_stage(thread_id, f"reply__{message_id}", relay,
-                          T.windows_ask(first_name), [AWAITING_LABEL], [],
-                          {"template": "windows_ask_fallback"}, message_id)
+        # The renter accepted SOMETHING we can't see - usually a time Alex
+        # negotiated by hand with no calendar event yet (Natalie + Yesenia,
+        # 8/5: both got "what day works?" right after saying yes). Asking
+        # again reads clueless; a human knows what was agreed.
+        needs_human(thread_id, first_name, address,
+                    "accepted a time but no matching calendar event - book it")
+        return "no-send:accept-without-event"
 
     event_id = existing["event"].get("id", "")
     stage = f"booked__{event_id}"
