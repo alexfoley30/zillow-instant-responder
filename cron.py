@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import gmail_client as gm
 import ledger
+import rules
 import templates as T
 
 log = logging.getLogger("zillow-instant.cron")
@@ -66,10 +67,19 @@ def _nudge_and_close():
     now = datetime.now(timezone.utc)
     q = (db.collection("zillow_threads")
          .where("state", "in", list(ledger.WAITING_STATES)).limit(50))
+    try:
+        blocked = ledger.blocked_addresses()
+    except Exception:  # noqa: BLE001
+        blocked = []
     for snap in q.stream():
         doc = snap.to_dict() or {}
         thread_id = snap.id
         if doc.get("alex_owned"):
+            continue
+        # A leased-address thread must never be nudged - alondra was told
+        # "rented" by the sweep, then the nudge re-invited her to tour (8/4).
+        if rules.is_blocked_address(doc.get("property_address") or "", blocked):
+            ledger.transition(thread_id, ledger.LEASED)
             continue
         last = doc.get("last_action_at") or doc.get("updated_at") or doc.get("created_at")
         if not last:

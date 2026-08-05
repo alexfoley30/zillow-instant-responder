@@ -575,9 +575,17 @@ def route_message(thread_id: str, subject: str, sender: str, message_id: str) ->
         # Legacy in-flight thread from the pre-ledger era: reconstruct.
         name = first_name or "there"
         addr = address or ""
-        state = ledger.BOOKED if any(
-            "you're all set" in gm.msg_body(m).lower()
-            for m in msgs if gm.is_from_alex(m)) else ledger.AWAITING_TIME
+        alex_bodies = [gm.msg_body(m).lower() for m in msgs if gm.is_from_alex(m)]
+        if any("you're all set" in b for b in alex_bodies):
+            state = ledger.BOOKED
+        elif any("has been rented" in b or "no longer available" in b
+                 for b in alex_bodies):
+            # The sweep already told this renter the home is rented - never
+            # reconstruct as waiting (alondra's thread got nudged into a tour
+            # invite for a leased house, 8/4).
+            state = ledger.LEASED
+        else:
+            state = ledger.AWAITING_TIME
         ledger.create_thread(thread_id, state=state, renter_name=name,
                              property_address=addr,
                              relay_email=gm.relay_from_thread(msgs),

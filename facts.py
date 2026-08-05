@@ -27,7 +27,9 @@ _RULES = [
     # approval requirements: blanket 3x-income answer (Alex 2026-08-05, Daliana)
     ("requirements", re.compile(
         r"\b(requirements?( to (get )?approved)?|qualifications?|qualify|"
-        r"get approved|approval process|income requirement)\b", re.IGNORECASE)),
+        r"get approved|approval process|income requirement|"
+        r"(bad|poor|low|not( so)? good|good income but).{0,20}credit|"
+        r"credit (score|check|isn.?t|not))\b", re.IGNORECASE)),
     # appliances: always included on Alex listings
     ("appliances", re.compile(
         r"(washer|dryer|fridge|refrigerator|appliances (included|come with)|"
@@ -43,8 +45,9 @@ APPLIANCES_LINE = ("Yes, the refrigerator, washer, and dryer are all included "
                    "with the home.")
 
 REQUIREMENTS_LINE = ("The main thing we look for is income of roughly 3x the "
-                     "monthly rent, and the exact move-in requirements come "
-                     "together through the application itself.")
+                     "monthly rent - beyond that, credit isn't an automatic "
+                     "yes or no on its own, and the exact requirements come "
+                     "together through the application as a whole.")
 
 # Short inline answers for merging into the FIRST reply (one send per inquiry,
 # never a second standing-rule email - shadow soak 7/30-8/1 caught the double).
