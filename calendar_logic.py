@@ -62,6 +62,20 @@ def _ev_end(ev: dict) -> datetime | None:
         return None
 
 
+def _ev_all_day_covers(ev: dict, day) -> bool:
+    """All-day events carry start.date (no dateTime). End date is exclusive."""
+    raw = (ev.get("start") or {}).get("date")
+    if not raw:
+        return False
+    try:
+        s = datetime.strptime(raw, "%Y-%m-%d").date()
+        end_raw = (ev.get("end") or {}).get("date")
+        e = datetime.strptime(end_raw, "%Y-%m-%d").date() if end_raw else s + timedelta(days=1)
+    except (ValueError, TypeError):
+        return False
+    return s <= day < e
+
+
 def fmt_showing_time(start_az: datetime) -> str:
     """'Wednesday, July 8, at 6:30 PM' with today/tomorrow prefix when true."""
     now_az = datetime.now(AZ_TZ)
@@ -120,9 +134,19 @@ def validate_slot(start_az: datetime, address: str, events: list,
     if not rules.respects_renter_bounds(start_az, bounds.get("after"), bounds.get("before")):
         return {"ok": False, "reason": "violates-renter-bounds", "fold": None}
 
-    day_events = [ev for ev in events
-                  if (_ev_start(ev) or datetime.min.replace(tzinfo=timezone.utc))
-                  .astimezone(AZ_TZ).date() == start_az.date()]
+    # NOTE: the old datetime.min fallback here raised OverflowError the moment
+    # an all-day event (no start.dateTime) appeared in the window - year 1
+    # minus UTC-7 is out of range. Three live renters hit it 2026-08-05.
+    # All-day events now count toward the day (so away blocks finally register);
+    # the timed-overlap checks below skip them naturally (_ev_start is None).
+    day_events = []
+    for ev in events:
+        s = _ev_start(ev)
+        if s is not None:
+            if s.astimezone(AZ_TZ).date() == start_az.date():
+                day_events.append(ev)
+        elif _ev_all_day_covers(ev, start_az.date()):
+            day_events.append(ev)
 
     # Away block applies to every candidate day.
     status = rules.away_block_status(rules.away_events(day_events, start_az.date()))
