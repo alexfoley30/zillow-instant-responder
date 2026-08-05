@@ -143,7 +143,8 @@ def needs_human(thread_id: str, first_name: str, address: str, last_line: str):
     if last_ping and (datetime.now(AZ_TZ).astimezone(last_ping.tzinfo) - last_ping) < timedelta(days=1):
         return
     msg = (f'Needs you: {first_name} — {address.split(",")[0]} — '
-           f'"{(last_line or "")[:80]}". Reply here or in Gmail.')
+           f'"{(last_line or "")[:80]}". Reply with your answer and I will '
+           f'send it to the renter. [zt:{thread_id}]')
     if dry_run():
         ledger.write_shadow(thread_id, f"poke__{ledger.content_hash(msg)}",
                             {"would_poke": msg})
@@ -234,13 +235,16 @@ def route_question(thread_id: str, first_name: str, address: str, relay: str,
                           [AWAITING_LABEL], [NEEDS_REPLY_LABEL],
                           {"template": f"standing:{rule}"}, message_id)
 
-    # No standing rule: hold the renter warmly, escalate to Alex.
-    result = send_stage(thread_id, f"reply__{message_id}", relay,
-                        T.checking_with_owner(first_name),
-                        [NEEDS_REPLY_LABEL], [], {"template": "checking_with_owner"},
-                        message_id)
+    # No standing rule: send NOTHING. The old "Great question! let me check"
+    # ack meant every unknown question cost the renter two emails (Alex,
+    # 8/5: "follow-up slop"). Escalate silently; Alex answers once via Poke
+    # (/send-approved) or Gmail, and that one real answer is the whole thread.
+    try:
+        gm.modify_labels(thread_id, [NEEDS_REPLY_LABEL], [])
+    except Exception as e:  # noqa: BLE001
+        log.error("needs-reply label failed: %s", e)
     needs_human(thread_id, first_name, address, question_text)
-    return result
+    return "no-send:escalated"
 
 
 def handle_negotiation(thread_id: str, first_name: str, relay: str,
@@ -630,7 +634,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         secret = self.headers.get("X-Webhook-Secret", "")
-        required = REPROCESS_SECRET if self.path.rstrip("/") == "/reprocess" else WEBHOOK_SECRET
+        required = (REPROCESS_SECRET
+                    if self.path.rstrip("/") in ("/reprocess", "/send-approved")
+                    else WEBHOOK_SECRET)
         if required and secret != required:
             self._send(401, "bad secret")
             return
@@ -643,6 +649,38 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
+            if self.path.rstrip("/") == "/send-approved":
+                # Poke approval loop: Alex answered a needs-you ping; the
+                # approval MCP relays it here. The SERVICE stays the single
+                # writer - Poke never emails renters, it commands this endpoint.
+                thread_id = payload.get("thread_id", "")
+                answer = (payload.get("answer") or "").strip()
+                if not thread_id or not answer:
+                    self._send(400, "missing thread_id or answer")
+                    return
+                doc = ledger.get_thread(thread_id)
+                if not doc:
+                    self._send(404, "unknown thread")
+                    return
+                relay = doc.get("relay_email") or ""
+                if not relay:
+                    msgs = gm.fetch_thread(thread_id)
+                    relay = gm.relay_from_thread(msgs)
+                if not relay:
+                    self._send(422, "no relay address on thread")
+                    return
+                first_name = doc.get("renter_name") or "there"
+                stage = f"approved__{ledger.content_hash(answer)}"
+                result = send_stage(
+                    thread_id, stage, relay,
+                    T.approved_answer(first_name, answer),
+                    [AWAITING_LABEL], [NEEDS_REPLY_LABEL],
+                    {"template": "approved_answer", "approved_via": "poke"})
+                if result == "sent" and doc.get("state") == ledger.NEEDS_HUMAN:
+                    ledger.transition(thread_id, ledger.AWAITING_TIME)
+                self._send(200, result)
+                return
+
             if self.path.rstrip("/") == "/reprocess":
                 thread_id = payload.get("thread_id", "")
                 message_id = payload.get("message_id", "") or f"reproc-{thread_id}-{datetime.now(AZ_TZ).strftime('%Y%m%d%H%M')}"

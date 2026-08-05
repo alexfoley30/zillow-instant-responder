@@ -199,13 +199,21 @@ def checking_with_owner(first_name):
     )
 
 
+def approved_answer(first_name, body):
+    """Alex's own words, approved via Poke - wrapped in greeting + signature
+    only. No bot framing, no bolted-on tour pitch."""
+    return (
+        f"Hi {first_name},\n\n"
+        f"{body.strip()}\n\n"
+        f"{SIGNATURE}"
+    )
+
+
 def fact_answer(first_name, answer_line):
     """Answer drawn from the property fact sheet (one to two short sentences,
     already composed by the caller from sheet facts)."""
     return (
         f"Hi {first_name},\n\n"
-        f"Great question! {answer_line}\n\n"
-        "Want to come take a look in person? Just tell me a day and time that "
-        "works and I'll lock it in.\n\n"
+        f"{answer_line}\n\n"
         f"{SIGNATURE}"
     )
