@@ -52,13 +52,19 @@ def number_and_core(address: str):
     return tokens[0], " ".join(core)
 
 
+def _number_present(number: str, haystack: str) -> bool:
+    """Whole-token street-number match: '1641' must not match inside '16413'
+    (regression test caught the substring version blocking the wrong house)."""
+    return re.search(rf"\b{re.escape(number)}\b", haystack) is not None
+
+
 def same_property(address: str, haystack: str) -> bool:
     """Same-property-only rule: BOTH street number and street-name core present."""
     number, core = number_and_core((address or "").split(",")[0])
     if not number or not core:
         return False
     hay = (haystack or "").lower()
-    return number in hay and core in hay
+    return _number_present(number, hay) and core in hay
 
 
 def addr_slug(address: str) -> str:
@@ -71,7 +77,7 @@ def is_blocked_address(address: str, blocked_list: list) -> bool:
     a = (address or "").lower()
     for blocked in blocked_list or []:
         number, core = number_and_core(blocked)
-        if number and core and number in a and core in a:
+        if number and core and _number_present(number, a) and core in a:
             return True
     return False
 
