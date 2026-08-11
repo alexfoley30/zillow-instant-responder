@@ -23,6 +23,8 @@ BLOCKED_ADDRESSES = [
     "3309 E San Remo Ave",   # Gilbert 85234 - leased 2026-07-04
     "8743 E Palo Verde Dr",  # Scottsdale 85250 - leased 2026-07-08
     "22500 N Greenland Park Dr",  # Maricopa 85139 - leased 2026-08-01
+    "1641 E Coronado Rd",    # Phoenix 85006 - leased 2026-08-01
+    "1294 E Apricot Ln",     # Gilbert 85298 - leased 2026-08-09 ($3,249)
 ]
 
 
