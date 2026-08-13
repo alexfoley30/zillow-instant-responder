@@ -204,13 +204,13 @@ def away_block_status(events_that_day: list) -> str:
 # ---------------------------------------------------------------- agent pick
 
 def pick_agent(start_az: datetime, now_az: datetime, thread_override: str | None = None) -> dict:
-    """Same-day bookings default to JACE (Alex 2026-07-27 flexibility push);
-    Alex default for next-day+. A thread-level override ('have Rhett cover')
-    beats both."""
+    """Same-day bookings default to RHETT (Alex 2026-08-13, replacing the
+    7/27 Jace default); Alex default for next-day+. A thread-level override
+    ('have Jace cover') beats both."""
     if thread_override and thread_override.lower() in AGENTS:
         return AGENTS[thread_override.lower()]
     if start_az.date() == now_az.date():
-        return JACE
+        return RHETT
     return ALEX
 
 

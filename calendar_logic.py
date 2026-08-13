@@ -164,7 +164,8 @@ def validate_slot(start_az: datetime, address: str, events: list,
         agent = rules.JACE  # Jace/Rhett not on the away event -> Jace covers
 
     # AGENT FALLBACK (2026-07-30, Kim/New Town): a valid requested time never
-    # bounces because Alex is busy - it books with Jace instead. Counters are
+    # bounces because Alex is busy - it books with the cover agent instead
+    # (Rhett since 2026-08-13, was Jace). Counters are
     # reserved for times that are themselves invalid (window/notice/bounds/
     # away-block), handled above.
     jace_cover = None
@@ -176,7 +177,7 @@ def validate_slot(start_az: datetime, address: str, events: list,
                 continue
             s_az, e_az = s.astimezone(AZ_TZ), e.astimezone(AZ_TZ)
             if s_az < end_az and start_az < e_az:
-                agent, jace_cover = rules.JACE, "alex-conflict"
+                agent, jace_cover = rules.RHETT, "alex-conflict"
                 break
             ev_addr = str(ev.get("location", "")) or str(ev.get("summary", ""))
             if not rules.same_property(address, _ev_text(ev)) and ev_addr.strip():

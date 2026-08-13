@@ -440,7 +440,7 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         jace_ping = None
         if same_day or jace_cover:
             reason = "same-day" if same_day else "Alex booked"
-            jace_ping = (f"Jace assigned: {first_name} at {address.split(',')[0]} "
+            jace_ping = (f"{agent['name'].split()[0]} assigned: {first_name} at {address.split(',')[0]} "
                          f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - {reason}. "
                          "Conflict? Reply fast.")
 
