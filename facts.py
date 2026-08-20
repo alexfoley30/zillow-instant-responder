@@ -10,6 +10,19 @@ import re
 
 # Standing rules (property-facts/README.md). Order matters: first hit wins.
 _RULES = [
+    # business operation / sublease / STR arbitrage: blanket brokerage decline
+    # (Alex 2026-08-18, Tynisha at New Town asked about running a licensed
+    # home-healthcare business from the property). The decline reason is ALWAYS
+    # residential-use-only + named-tenants-only, applied uniformly - never the
+    # nature of who would live there (fair-housing).
+    ("no_business_sublease", re.compile(
+        r"(sub-?let|sub-?lease|re-?rent|rental arbitrage|\barbitrage\b|"
+        r"air ?bnb|\bvrbo\b|short[- ]term rental|corporate housing|"
+        r"(run|operate|start|open|use)\w*[^.\n]{0,40}"
+        r"(business|facility|day ?care|child ?care|group home|care home|"
+        r"assisted living|sober living|home[- ]?health)|"
+        r"business[^.\n]{0,30}(out of|from|at) (the|this) (home|house|property)|"
+        r"operate out of)", re.IGNORECASE)),
     # floor plans / dimensions / sqft-per-room: always "unavailable, come see it"
     ("floor_plan", re.compile(
         r"(floor ?plan|lay ?out|dimensions|measurements|how (big|large) is the "
@@ -61,6 +74,12 @@ REQUIREMENTS_LINE = ("The main thing we look for is income of roughly 3x the "
 # Short inline answers for merging into the FIRST reply (one send per inquiry,
 # never a second standing-rule email - shadow soak 7/30-8/1 caught the double).
 ANSWER_LINES = {
+    "no_business_sublease": (
+        "Thanks for asking upfront - unfortunately our brokerage doesn't "
+        "allow that. Our leases are residential use only for the tenants "
+        "named on the lease, so operating a business from the home or "
+        "re-renting it (sublease, Airbnb, or short-term rental) isn't "
+        "something we can accommodate."),
     "as_is": ("Good question - the home is offered just as you see it, so we "
               "aren't able to make changes or additions."),
     "floor_plan": ("On the floor plan - we don't have one available to send, "

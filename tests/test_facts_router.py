@@ -78,3 +78,30 @@ def test_answer_lines_cover_all_routable_rules():
                 "fair_housing", "apply_first", "floor_plan"):
         assert key in facts.ANSWER_LINES, f"missing ANSWER_LINES[{key}]"
         assert "Great question" not in facts.ANSWER_LINES[key]
+
+
+def test_no_business_sublease_home_healthcare():
+    # Tynisha, New Town 2026-08-18: the phrasing that created the rule
+    assert rule("Would I be able to operate a licensed senior home-healthcare "
+                 "business out of the property?") == "no_business_sublease"
+
+
+def test_no_business_sublease_str_arbitrage():
+    assert rule("Are you open to me renting it and listing it on Airbnb as a "
+                 "short term rental?") == "no_business_sublease"
+    assert rule("Can I sublease rooms to my own tenants?") == "no_business_sublease"
+    assert rule("I do rental arbitrage, is the owner flexible?") == "no_business_sublease"
+
+
+def test_no_business_sublease_daycare_operation():
+    assert rule("I want to run a daycare from the house, is that ok?") == "no_business_sublease"
+
+
+def test_daycare_nearby_is_not_business_ask():
+    # Neighborhood question, must NOT trigger the decline
+    assert rule("Is there a daycare nearby?") != "no_business_sublease"
+
+
+def test_business_wifi_question_not_fooled():
+    # Working from home is not operating a business facility
+    assert rule("Is the internet fast enough to work from home?") != "no_business_sublease"
