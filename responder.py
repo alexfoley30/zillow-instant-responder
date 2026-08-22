@@ -296,7 +296,8 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
                 log.error("decline relabel failed: %s", e)
             ledger.transition(thread_id, ledger.CLOSED)
             return "no-send:decline"
-        return handle_cancellation(thread_id, doc, first_name, relay, message_id)
+        return handle_cancellation(thread_id, doc, first_name, relay,
+                                   message_id, cls=cls, address=address)
 
     if state == ledger.LEASED:
         return "skipped:leased-thread"
@@ -531,12 +532,17 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                       [AWAITING_LABEL], [], {"template": "counter"}, message_id)
 
 
-def handle_cancellation(thread_id, doc, first_name, relay, message_id) -> str:
+def handle_cancellation(thread_id, doc, first_name, relay, message_id,
+                        cls=None, address=None) -> str:
     event_id = doc.get("event_id")
+    # Reason-aware (Jamie 2026-08-22, "dead battery"): when the renter SAID
+    # why, never ask why again. Slot-aware: after clearing them off the
+    # calendar, offer the next remaining showing at the home if one exists.
+    reason_given = bool((cls or {}).get("cancel_reason"))
     if dry_run():
         ledger.write_shadow(thread_id, f"reply__{message_id}", {
             "would_calendar": {"cancel": True, "event_id": event_id},
-            "would_body": T.reschedule_after_cancel(first_name),
+            "would_body": T.reschedule_after_cancel(first_name, reason_given),
         })
         return "shadowed"
     if event_id:
@@ -546,8 +552,19 @@ def handle_cancellation(thread_id, doc, first_name, relay, message_id) -> str:
             cal.remove_renter_or_cancel(event_id, doc.get("renter_name") or "")
         except Exception as e:  # noqa: BLE001
             log.error("cancel/remove failed (continuing): %s", e)
+    next_when = None
+    addr = address or doc.get("property_address") or ""
+    if addr:
+        try:
+            for slot in cal.find_existing_showings(addr):
+                if slot["event"].get("id") != event_id:
+                    next_when = slot["when_human"]
+                    break
+        except Exception as e:  # noqa: BLE001
+            log.error("post-cancel slot lookup failed: %s", e)
     result = send_stage(thread_id, f"reply__{message_id}", relay,
-                        T.reschedule_after_cancel(first_name),
+                        T.reschedule_after_cancel(first_name, reason_given,
+                                                  next_when),
                         [AWAITING_LABEL], [HANDLED_LABEL],
                         {"template": "reschedule"}, message_id)
     ledger.transition(thread_id, ledger.AWAITING_TIME, event_id=None,

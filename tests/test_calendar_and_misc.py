@@ -180,3 +180,30 @@ def test_remove_renter_parsing_logic():
     assert names == ["Sezer", "Dylan"]
     remaining = [n for n in names if n.lower() != "sezer"]
     assert remaining == ["Dylan"]
+
+
+# ------------------------------- reason-aware reschedule (8/22 Jamie battery)
+
+def test_reschedule_reason_given_skips_why():
+    body = T.reschedule_after_cancel("Jamie", reason_given=True)
+    assert "did something change" not in body
+    assert "timing thing" not in body
+    assert "No worries at all" in body
+
+
+def test_reschedule_no_reason_still_asks_why():
+    body = T.reschedule_after_cancel("Jamie", reason_given=False)
+    assert "did something change on your end" in body
+
+
+def test_reschedule_offers_next_slot():
+    body = T.reschedule_after_cancel("Jamie", reason_given=True,
+                                     next_when="today, Friday, at 1:00 PM")
+    assert "showing the home again today, Friday, at 1:00 PM" in body
+    assert "put you back in" in body
+
+
+def test_llm_schema_has_cancel_reason():
+    import llm
+    assert "cancel_reason" in llm.SCHEMA["properties"]
+    assert "cancel_reason" in llm.SCHEMA["required"]

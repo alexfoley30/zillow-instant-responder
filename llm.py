@@ -41,12 +41,19 @@ SCHEMA = {
         },
         "wants_same_day": {"type": "boolean"},
         "question_text": {"type": ["string", "null"]},
+        "cancel_reason": {"type": ["string", "null"]},
     },
-    "required": ["intent", "time_candidates", "wants_same_day", "question_text"],
+    "required": ["intent", "time_candidates", "wants_same_day", "question_text",
+                 "cancel_reason"],
     "additionalProperties": False,
 }
 
 PROMPT = """You are classifying a renter's email reply in a rental-showing scheduling thread.
+
+If the intent is "cancellation" and the renter STATED a reason for canceling
+(car trouble, illness, work, found another place, etc.), put a short phrase of
+that reason in cancel_reason (e.g. "dead car battery"). Otherwise cancel_reason
+is null. Never invent a reason.
 
 Current date/time in Phoenix, Arizona: {now}
 The last message WE sent them (for resolving "yes"/"that works"):

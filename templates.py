@@ -138,17 +138,36 @@ def leased_reply(first_name, address):
     )
 
 
-def reschedule_after_cancel(first_name):
+def reschedule_after_cancel(first_name, reason_given=False, next_when=None):
     # Protocol (Alex 2026-08-05): calendar cleared first, then ask WHY they
     # canceled, then invite a rebook - the why tells us if the lead is dead.
+    # Refined 2026-08-22 (Jamie, dead car battery): when the renter already
+    # SAID why, asking "did something change?" reads like we didn't read
+    # their message - acknowledge and skip the why. And when another showing
+    # at the home is already on the calendar, offer that exact time first.
+    if reason_given:
+        opener = ("No worries at all, thanks for letting me know - I've taken "
+                  "it off the calendar. Hope everything gets sorted quickly!")
+        why = ""
+    else:
+        opener = ("No problem at all, thanks for the heads up! I've taken it "
+                  "off the calendar.")
+        why = ("Was it just a timing thing, or did something change on your "
+               "end? ")
+    if next_when:
+        rebook = (f"Good news - we'll be showing the home again {next_when} "
+                  "(Arizona time), so just say the word and I'll put you back "
+                  "in for that one. Or send me any other day and time that "
+                  "works and I'll get you rebooked. Here's what I have open "
+                  "(Phoenix time):\n\n")
+    else:
+        rebook = ("If you'd still like to see the home, send me a day and "
+                  "time that works and I'll get you rebooked. Here's what I "
+                  "have open (Phoenix time):\n\n")
     return (
         f"Hi {first_name},\n\n"
-        "No problem at all, thanks for the heads up! I've taken it off the "
-        "calendar.\n\n"
-        "Was it just a timing thing, or did something change on your end? "
-        "If you'd still like to see the home, send me a day and time that "
-        "works and I'll get you rebooked. Here's what I have open "
-        "(Phoenix time):\n\n"
+        f"{opener}\n\n"
+        f"{why}{rebook}"
         f"{WINDOWS_BLOCK}\n"
         f"{SIGNATURE}"
     )
