@@ -175,7 +175,7 @@ def validate_slot(start_az: datetime, address: str, events: list,
     same_day = rules.is_same_day(start_az, now_az)
     agent = rules.pick_agent(start_az, now_az)
     if status == "alex-away" and agent["email"] == rules.ALEX["email"]:
-        agent = rules.JACE  # Jace/Rhett not on the away event -> Jace covers
+        agent = rules.RHETT  # cover default is Rhett (Alex 2026-08-13; was Jace)
 
     # AGENT FALLBACK (2026-07-30, Kim/New Town): a valid requested time never
     # bounces because Alex is busy - it books with the cover agent instead
