@@ -762,6 +762,19 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(422, "no relay address on thread")
                     return
                 first_name = doc.get("renter_name") or "there"
+                # Alex may have already answered by hand (Jamie 8/22: manual
+                # reply at 1:16 PM, approved send 3 min later = double
+                # apology). If the LAST message in the thread is from Alex,
+                # skip unless the caller passes force:true.
+                if not payload.get("force"):
+                    try:
+                        msgs_chk = gm.fetch_thread(thread_id)
+                        if msgs_chk and gm.is_from_alex(msgs_chk[-1]):
+                            self._send(200, "skipped:alex-replied-last")
+                            return
+                    except Exception as e:  # noqa: BLE001
+                        log.error("send-approved freshness check failed "
+                                  "(continuing): %s", e)
                 stage = f"approved__{ledger.content_hash(answer)}"
                 result = send_stage(
                     thread_id, stage, relay,
