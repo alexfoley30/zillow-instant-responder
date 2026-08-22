@@ -60,8 +60,38 @@ def _recover_stuck():
             log.error("recover check failed %s: %s", key, e)
 
 
+def _age_needs_human():
+    """NEEDS_HUMAN threads used to live forever (34 piled up by 2026-08-22,
+    16 at already-leased homes). Alex's ruling: blocked-address escalations
+    flip to LEASED silently; anything else unresolved for 7 days closes
+    silently. Alex-owned threads are never touched (he may be working the
+    deal off-channel)."""
+    db = ledger.init_db()
+    now = datetime.now(timezone.utc)
+    try:
+        blocked = ledger.blocked_addresses()
+    except Exception:  # noqa: BLE001
+        blocked = []
+    q = (db.collection("zillow_threads")
+         .where("state", "==", ledger.NEEDS_HUMAN).limit(50))
+    for snap in q.stream():
+        doc = snap.to_dict() or {}
+        if doc.get("alex_owned"):
+            continue
+        if rules.is_blocked_address(doc.get("property_address") or "", blocked):
+            ledger.transition(snap.id, ledger.LEASED,
+                              closed_reason="needs-human-at-leased")
+            continue
+        last = doc.get("last_action_at") or doc.get("updated_at") or doc.get("created_at")
+        if last and now - last > timedelta(days=CLOSE_AFTER_D):
+            ledger.transition(snap.id, ledger.CLOSED,
+                              closed_reason="needs-human-stale-7d")
+
+
 def _nudge_and_close():
     import responder  # lazy: avoids circular import at module load
+
+    _age_needs_human()
 
     db = ledger.init_db()
     now = datetime.now(timezone.utc)

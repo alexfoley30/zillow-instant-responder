@@ -211,6 +211,37 @@ _CUT_RE = re.compile("(" + "|".join([
 ]) + ")", re.IGNORECASE)
 
 
+_BODY_NAME_RE = re.compile(
+    r"RENTER'?.?S NAME</div>\s*<div[^>]*>\s*([A-Za-z][A-Za-z'’. -]{0,40}?)\s*<",
+    re.IGNORECASE | re.DOTALL)
+_BODY_ADDR_RE = re.compile(
+    r"Regarding your listing at:</div>\s*</td>\s*</tr>\s*<tr>\s*<td[^>]*>"
+    r"\s*<div[^>]*>\s*([^<]{5,90}?)\s*<",
+    re.IGNORECASE | re.DOTALL)
+_BODY_ADDR_LOOSE_RE = re.compile(
+    r"Regarding your listing at:.{0,400}?>\s*(\d{2,6}[^<]{5,80}?)\s*<",
+    re.IGNORECASE | re.DOTALL)
+
+
+def extract_identity_from_body(message: dict) -> tuple:
+    """Fallback for email shapes whose SUBJECT loses the renter name/address
+    (the "requesting to tour" family, 2026-08-22). Zillow's HTML body always
+    carries a RENTER'S NAME block and a "Regarding your listing at:" block -
+    pull both from the raw messageText. Returns (first_name|None, address|None)."""
+    html = str(message.get("messageText") or "")
+    if not html:
+        return None, None
+    name = None
+    m = _BODY_NAME_RE.search(html)
+    if m:
+        name = m.group(1).strip().split()[0].strip(".,")
+    addr = None
+    m = _BODY_ADDR_RE.search(html) or _BODY_ADDR_LOOSE_RE.search(html)
+    if m:
+        addr = m.group(1).strip().rstrip(".")
+    return (name or None), (addr or None)
+
+
 def extract_renter_text(m: dict) -> str:
     """Best-effort extraction of the renter's own words from a relay message.
     First-inquiry format: text sits after '<Name> says:'. Reply format: text

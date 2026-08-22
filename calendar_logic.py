@@ -6,6 +6,7 @@ event -> confirmation send -> labels (the ATOMIC BOOKING TRIPWIRE).
 """
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 import rules
@@ -266,3 +267,37 @@ def cancel_event(event_id: str):
         "calendarId": "primary",
         "event_id": event_id,
     })
+
+
+def remove_renter_or_cancel(event_id: str, first_name: str) -> str:
+    """Fold-aware cancellation (Alex ruling 2026-08-22, after one renter's
+    cancel deleted a shared consolidated event on 8/21): take this renter off
+    the event's Inquirer list; DELETE the event only when they were the last
+    renter on it. Returns 'removed' | 'canceled'."""
+    ev = None
+    try:
+        for cand in list_events(7):
+            if cand.get("id") == event_id:
+                ev = cand
+                break
+    except Exception as e:  # noqa: BLE001
+        log.error("remove_renter lookup failed for %s: %s", event_id, e)
+    desc = str((ev or {}).get("description", ""))
+    m = re.search(r"Inquirer:\s*([^\n]+)", desc)
+    if not ev or not m or not first_name:
+        cancel_event(event_id)
+        return "canceled"
+    names = [n.strip() for n in m.group(1).rstrip(". ").split(",") if n.strip()]
+    remaining = [n for n in names if n.lower() != first_name.strip().lower()]
+    if not remaining:
+        cancel_event(event_id)
+        return "canceled"
+    new_line = "Inquirer: " + ", ".join(remaining) + "."
+    new_desc = desc[:m.start()] + new_line + desc[m.end():]
+    composio_execute("GOOGLECALENDAR_UPDATE_EVENT", {
+        "calendarId": "primary",
+        "event_id": event_id,
+        "description": new_desc,
+        "send_updates": True,
+    })
+    return "removed"

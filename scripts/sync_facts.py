@@ -25,6 +25,9 @@ BLOCKED_ADDRESSES = [
     "22500 N Greenland Park Dr",  # Maricopa 85139 - leased 2026-08-01
     "1641 E Coronado Rd",    # Phoenix 85006 - leased 2026-08-01
     "1294 E Apricot Ln",     # Gilbert 85298 - leased 2026-08-09 ($3,249)
+    "3896 E Alfalfa Dr",     # Gilbert 85298 - leased 2026-08-20 ($3,399)
+    "736 E Gold Dust Way",   # Gilbert - leased (Alex audit 2026-08-22)
+    "300 N Gila Springs Blvd",  # Chandler - leased (Alex audit 2026-08-22)
 ]
 
 

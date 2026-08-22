@@ -66,7 +66,8 @@ def dry_run() -> bool:
 
 SUBJECT_RE = re.compile(
     r"^(?:Re:\s*)?(?P<name>[A-Za-z][\w'’.-]*)\s+is\s+requesting\s+"
-    r"(?:information about|an application for)\s+(?P<address>.+?)\s*$",
+    r"(?:information about|an application for|(?:to|a) tour(?: of)?)\s+"
+    r"(?P<address>.+?)\s*$",
     re.IGNORECASE,
 )
 
@@ -540,9 +541,11 @@ def handle_cancellation(thread_id, doc, first_name, relay, message_id) -> str:
         return "shadowed"
     if event_id:
         try:
-            cal.cancel_event(event_id)
+            # Fold-aware: shared consolidated events survive one renter's
+            # cancel; only a solo event is deleted (Alex 2026-08-22).
+            cal.remove_renter_or_cancel(event_id, doc.get("renter_name") or "")
         except Exception as e:  # noqa: BLE001
-            log.error("cancel_event failed (continuing): %s", e)
+            log.error("cancel/remove failed (continuing): %s", e)
     result = send_stage(thread_id, f"reply__{message_id}", relay,
                         T.reschedule_after_cancel(first_name),
                         [AWAITING_LABEL], [HANDLED_LABEL],
@@ -575,9 +578,11 @@ def handle_alex_owned_reply(thread_id, doc, msgs, renter_text, message_id) -> st
         return "shadowed"
     if event_id:
         try:
-            cal.cancel_event(event_id)
+            # Fold-aware: shared consolidated events survive one renter's
+            # cancel; only a solo event is deleted (Alex 2026-08-22).
+            cal.remove_renter_or_cancel(event_id, doc.get("renter_name") or "")
         except Exception as e:  # noqa: BLE001
-            log.error("cancel_event failed (continuing): %s", e)
+            log.error("cancel/remove failed (continuing): %s", e)
     try:
         gm.modify_labels(thread_id, [NEEDS_REPLY_LABEL], [HANDLED_LABEL])
     except Exception as e:  # noqa: BLE001
@@ -619,6 +624,14 @@ def route_message(thread_id: str, subject: str, sender: str, message_id: str) ->
 
     doc = ledger.get_thread(thread_id)
     first_name, address = parse_subject(subject)
+    if (not first_name or not address) and msgs:
+        # Subject shapes like "requesting to tour" used to lose both fields
+        # ("Hi there" greetings, blank-address confirmations, and a leased
+        # home could get a showing invite because the blocked check had no
+        # address). The body always carries them (2026-08-22).
+        b_name, b_addr = gm.extract_identity_from_body(msgs[0])
+        first_name = first_name or b_name
+        address = address or b_addr
 
     if doc is None and first_name and len(msgs) <= 2 and not any(
             gm.is_from_alex(m) for m in msgs):
@@ -738,7 +751,11 @@ class Handler(BaseHTTPRequestHandler):
                     T.approved_answer(first_name, answer),
                     [AWAITING_LABEL], [NEEDS_REPLY_LABEL],
                     {"template": "approved_answer", "approved_via": "poke"})
-                if result == "sent" and doc.get("state") == ledger.NEEDS_HUMAN:
+                if result == "sent" and doc.get("state") in (
+                        ledger.NEEDS_HUMAN, ledger.CLOSED):
+                    # CLOSED included 2026-08-22: Jamie's price-drop reply
+                    # landed on a dead-closed thread that stayed CLOSED and
+                    # could not book until hand-reopened.
                     ledger.transition(thread_id, ledger.AWAITING_TIME)
                 self._send(200, result)
                 return

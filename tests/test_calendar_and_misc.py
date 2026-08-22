@@ -140,3 +140,43 @@ def test_offer_existing_reply_template():
     assert "11:00 AM" in body and "1:00 PM" in body
     assert "add you right in" in body
     assert "exact time" in body
+
+
+# --------------------------------- 8/22 debug batch: tour shape + fold-cancel
+
+def test_subject_regex_tour_variants():
+    import responder as R
+    assert R.parse_subject(
+        "Madison is requesting to tour 1110 E Redfield Rd, Tempe, AZ, 85283"
+    ) == ("Madison", "1110 E Redfield Rd, Tempe, AZ, 85283")
+    assert R.parse_subject(
+        "Courtney is requesting a tour of 1110 E Redfield Rd, Tempe, AZ, 85283"
+    )[0] == "Courtney"
+    assert R.parse_subject(
+        "Re: Jamie is requesting information about 1110 E Redfield Rd, Tempe, AZ, 85283"
+    ) == ("Jamie", "1110 E Redfield Rd, Tempe, AZ, 85283")
+
+
+def test_body_identity_extraction():
+    html = ('<div>RENTER\N{RIGHT SINGLE QUOTATION MARK}S NAME</div>'
+            '<div style="x">Jamie Dallas </div>'
+            '<div>Regarding your listing at:</div></td></tr><tr><td align="left">'
+            '<div style="y">1110 E Redfield Rd, Tempe, AZ 85283</div>')
+    name, addr = gm.extract_identity_from_body({"messageText": html})
+    assert name == "Jamie"
+    assert addr == "1110 E Redfield Rd, Tempe, AZ 85283"
+
+
+def test_body_identity_extraction_empty():
+    assert gm.extract_identity_from_body({"messageText": ""}) == (None, None)
+    assert gm.extract_identity_from_body({}) == (None, None)
+
+
+def test_remove_renter_parsing_logic():
+    import re as _re
+    desc = "Zillow inquiry. Inquirer: Sezer, Dylan.\nAgent: Rhett."
+    m = _re.search(r"Inquirer:\s*([^\n]+)", desc)
+    names = [n.strip() for n in m.group(1).rstrip(". ").split(",") if n.strip()]
+    assert names == ["Sezer", "Dylan"]
+    remaining = [n for n in names if n.lower() != "sezer"]
+    assert remaining == ["Dylan"]
