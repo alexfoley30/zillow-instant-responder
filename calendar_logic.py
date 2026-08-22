@@ -87,16 +87,21 @@ def fmt_showing_time(start_az: datetime) -> str:
     return f"{day}, at {start_az.strftime('%-I:%M %p')}"
 
 
-def find_existing_showing(address: str, events: list = None,
-                          min_lead_hours: float = 2.0) -> dict | None:
-    """CONSOLIDATE FIRST: upcoming showing at THIS house (same street number +
-    name core, 'showing'/'open house' in text). Returns {event, start_az,
-    when_human} or None."""
+def find_existing_showings(address: str, events: list = None,
+                           min_lead_hours: float = 2.0, limit: int = 2) -> list:
+    """CONSOLIDATE FIRST: all upcoming showings at THIS house (same street
+    number + name core, 'showing'/'open house' in text), soonest first,
+    capped at `limit`. Each item: {event, start_az, when_human}.
+
+    Added 2026-08-22 (Jamie/Redfield): "Are you available today?" got the
+    generic windows-ask while TWO same-day showings sat on the calendar -
+    the vague_time branch never consulted the calendar. This is its lookup."""
     try:
         events = events if events is not None else list_events(7)
     except Exception as e:  # noqa: BLE001
-        log.error("find_existing_showing list failed for %r: %s", address, e)
-        return None
+        log.error("find_existing_showings list failed for %r: %s", address, e)
+        return []
+    hits = []
     for ev in events:
         hay = _ev_text(ev)
         if not rules.same_property(address, hay):
@@ -109,9 +114,17 @@ def find_existing_showing(address: str, events: list = None,
         if start < datetime.now(timezone.utc) + timedelta(hours=min_lead_hours):
             continue
         start_az = start.astimezone(AZ_TZ)
-        return {"event": ev, "start_az": start_az,
-                "when_human": fmt_showing_time(start_az)}
-    return None
+        hits.append({"event": ev, "start_az": start_az,
+                     "when_human": fmt_showing_time(start_az)})
+    hits.sort(key=lambda h: h["start_az"])
+    return hits[:limit]
+
+
+def find_existing_showing(address: str, events: list = None,
+                          min_lead_hours: float = 2.0) -> dict | None:
+    """Single-slot wrapper around find_existing_showings (soonest or None)."""
+    hits = find_existing_showings(address, events, min_lead_hours, limit=1)
+    return hits[0] if hits else None
 
 
 def validate_slot(start_az: datetime, address: str, events: list,

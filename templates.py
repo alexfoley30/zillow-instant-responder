@@ -99,6 +99,23 @@ def counter_proposal(first_name, slots_human):
     )
 
 
+def offer_existing_reply(first_name, when_human):
+    """Reply-stage consolidate-first (added 2026-08-22, Jamie/Redfield):
+    renter asked vaguely ("today?", "Saturday?") and the house already has
+    upcoming showing(s) - push the exact time(s) instead of generic windows.
+    `when_human` is pre-joined by the caller ("today, Friday, at 11:00 AM
+    or at 1:00 PM")."""
+    return (
+        f"Hi {first_name},\n\n"
+        f"Good timing! We actually have a showing already set up {when_human} "
+        "(Arizona time). Can you make that work? Just say the word and I'll "
+        "add you right in.\n\n"
+        "If not, no problem at all - send me a day and an exact time that "
+        "works and I'll get you set up.\n\n"
+        f"{SIGNATURE}"
+    )
+
+
 def windows_ask(first_name):
     """Vague time ('sometime this weekend') - ask for an exact time."""
     return (

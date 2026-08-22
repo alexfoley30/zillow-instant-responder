@@ -85,3 +85,58 @@ def test_leased_reply_never_invites_tour():
     body = T.leased_reply("Alondra", "1641 E Coronado Rd")
     assert "rented" in body
     assert "tour" not in body.lower()
+
+
+# ----------------------------------------- vague-time consolidate (8/22 Jamie)
+
+def _showing_event(summary, location, start_iso):
+    return {"summary": summary, "location": location,
+            "start": {"dateTime": start_iso}}
+
+
+def test_find_existing_showings_returns_all_sorted():
+    from datetime import datetime, timedelta, timezone
+    base = datetime.now(timezone.utc) + timedelta(hours=6)
+    later = base + timedelta(hours=2)
+    events = [
+        _showing_event("Rhett Showing: 1110 E Redfield Rd",
+                       "1110 E Redfield Rd, Tempe, AZ, 85283",
+                       later.isoformat()),
+        _showing_event("Rhett Showing: 1110 E Redfield Rd",
+                       "1110 E Redfield Rd, Tempe, AZ, 85283",
+                       base.isoformat()),
+        _showing_event("Jace Showing: 2118 S El Marino",
+                       "2118 S El Marino, Mesa, AZ", base.isoformat()),
+    ]
+    hits = cal.find_existing_showings("1110 E Redfield Rd, Tempe, AZ, 85283",
+                                      events=events)
+    assert len(hits) == 2
+    assert hits[0]["start_az"] < hits[1]["start_az"]
+
+
+def test_find_existing_showings_skips_short_lead():
+    from datetime import datetime, timedelta, timezone
+    soon = datetime.now(timezone.utc) + timedelta(minutes=30)
+    events = [_showing_event("Showing: 1110 E Redfield Rd",
+                             "1110 E Redfield Rd, Tempe, AZ, 85283",
+                             soon.isoformat())]
+    assert cal.find_existing_showings("1110 E Redfield Rd, Tempe, AZ, 85283",
+                                      events=events) == []
+
+
+def test_find_existing_showing_single_still_works():
+    from datetime import datetime, timedelta, timezone
+    base = datetime.now(timezone.utc) + timedelta(hours=6)
+    events = [_showing_event("Showing: 1110 E Redfield Rd",
+                             "1110 E Redfield Rd, Tempe, AZ, 85283",
+                             base.isoformat())]
+    hit = cal.find_existing_showing("1110 E Redfield Rd, Tempe, AZ, 85283",
+                                    events=events)
+    assert hit and hit["when_human"]
+
+
+def test_offer_existing_reply_template():
+    body = T.offer_existing_reply("Jamie", "today, Friday, at 11:00 AM or at 1:00 PM")
+    assert "11:00 AM" in body and "1:00 PM" in body
+    assert "add you right in" in body
+    assert "exact time" in body

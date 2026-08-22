@@ -332,6 +332,28 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
                                   cls, message_id, now_az)
 
     if intent == "vague_time":
+        # CONSOLIDATE FIRST applies to vague replies too (2026-08-22, Jamie/
+        # Redfield: "Are you available today?" got windows-ask while two
+        # same-day showings sat on the calendar). Offer existing exact times;
+        # windows-ask only when the calendar has nothing to offer.
+        slots = []
+        try:
+            slots = cal.find_existing_showings(address) if address else []
+        except Exception as e:  # noqa: BLE001
+            log.error("vague-time consolidate lookup failed for %s: %s",
+                      thread_id, e)
+        if slots:
+            when_h = slots[0]["when_human"]
+            if len(slots) > 1:
+                second = slots[1]
+                if second["start_az"].date() == slots[0]["start_az"].date():
+                    when_h += f" or at {second['start_az'].strftime('%-I:%M %p')}"
+                else:
+                    when_h += f" or {second['when_human']}"
+            return send_stage(thread_id, f"reply__{message_id}", relay,
+                              T.offer_existing_reply(first_name, when_h),
+                              [AWAITING_LABEL], [],
+                              {"template": "offer_existing_reply"}, message_id)
         return send_stage(thread_id, f"reply__{message_id}", relay,
                           T.windows_ask(first_name), [AWAITING_LABEL], [],
                           {"template": "windows_ask"}, message_id)
