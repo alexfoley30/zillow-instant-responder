@@ -97,3 +97,56 @@ def test_blocked_address_no_substring_number():
 
 def test_addr_slug():
     assert rules.addr_slug("1641 E Coronado Rd, Phoenix, AZ 85006") == "1641-e-coronado-rd"
+
+
+# --------------------------------------- weekday snap (8/22 Adam Friday bug)
+
+def _snap(raw, llm_date, now):
+    cls = {"time_candidates": [{"raw": raw, "date": llm_date, "time": "13:00",
+                                "after": None, "before": None}]}
+    rules.snap_weekday_dates(cls, now)
+    return cls["time_candidates"][0]
+
+
+def test_snap_fixes_adam_friday_as_saturday():
+    from datetime import datetime
+    # Thu Aug 20 2026, 11:24 PM AZ; model resolved "Friday" to Sat 8/22
+    now = datetime(2026, 8, 20, 23, 24, tzinfo=rules.AZ_TZ)
+    c = _snap("Friday around 1-1:30", "2026-08-22", now)
+    assert c["date"] == "2026-08-21"
+    assert c.get("weekday_snapped") is True
+
+
+def test_snap_leaves_correct_weekday_alone():
+    from datetime import datetime
+    now = datetime(2026, 8, 20, 23, 24, tzinfo=rules.AZ_TZ)
+    c = _snap("Saturday morning", "2026-08-22", now)
+    assert c["date"] == "2026-08-22"
+    assert "weekday_snapped" not in c
+
+
+def test_snap_ignores_non_weekday_raw():
+    from datetime import datetime
+    now = datetime(2026, 8, 20, 23, 24, tzinfo=rules.AZ_TZ)
+    c = _snap("tomorrow at 2", "2026-08-21", now)
+    assert c["date"] == "2026-08-21"
+    assert "weekday_snapped" not in c
+
+
+def test_snap_fills_missing_date_from_weekday():
+    from datetime import datetime
+    now = datetime(2026, 8, 20, 23, 24, tzinfo=rules.AZ_TZ)
+    c = _snap("Sunday works", None, now)
+    assert c["date"] == "2026-08-23"
+
+
+def test_snap_next_weekday_rolls_forward_on_mismatch():
+    from datetime import datetime
+    # Thursday; model botched "next Friday" to Saturday -> snap rolls a week
+    # out instead of tomorrow. A weekday-CONSISTENT model date is left alone.
+    now = datetime(2026, 8, 20, 12, 0, tzinfo=rules.AZ_TZ)
+    c = _snap("next Friday", "2026-08-22", now)
+    assert c["date"] == "2026-08-28"
+    c2 = _snap("next Friday", "2026-08-28", now)
+    assert c2["date"] == "2026-08-28"
+    assert "weekday_snapped" not in c2

@@ -216,3 +216,39 @@ def pick_agent(start_az: datetime, now_az: datetime, thread_override: str | None
 
 def is_same_day(start_az: datetime, now_az: datetime) -> bool:
     return start_az.date() == now_az.date()
+
+
+# ------------------------------------------- weekday consistency (8/22 Adam)
+
+_WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+             "friday": 4, "saturday": 5, "sunday": 6}
+
+
+def snap_weekday_dates(cls: dict, now_az: datetime) -> dict:
+    """Deterministic guard on LLM date resolution (Adam, 2026-08-22: renter
+    wrote 'Friday around 1-1:30' on a Thursday night; the model resolved it
+    to 2026-08-22, a SATURDAY, and the booking pipeline faithfully booked
+    the wrong day). The extractor extracts; this decides: when a candidate's
+    raw text names a weekday, the date MUST fall on that weekday - otherwise
+    recompute it as the next occurrence of the named weekday from now
+    (today counts). 'next <weekday>' within a day of now rolls a week out.
+    Mutates and returns cls."""
+    from datetime import date as _date, timedelta as _td
+    for c in cls.get("time_candidates") or []:
+        raw = (c.get("raw") or "").lower()
+        named = next((wd for name, wd in _WEEKDAYS.items() if name in raw), None)
+        if named is None:
+            continue
+        parsed = None
+        try:
+            parsed = _date.fromisoformat(c.get("date") or "")
+        except (ValueError, TypeError):
+            pass
+        if parsed is not None and parsed.weekday() == named:
+            continue  # model got it right
+        days_ahead = (named - now_az.weekday()) % 7
+        if "next " in raw and days_ahead <= 1:
+            days_ahead += 7
+        c["date"] = (now_az.date() + _td(days=days_ahead)).isoformat()
+        c["weekday_snapped"] = True
+    return cls

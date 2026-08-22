@@ -277,7 +277,8 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
 
     last_alex = next((gm.msg_body(m) for m in reversed(msgs) if gm.is_from_alex(m)), "")
     now_az = datetime.now(AZ_TZ)
-    cls = llm.classify_reply(renter_text, last_alex, now_az)
+    cls = rules.snap_weekday_dates(
+        llm.classify_reply(renter_text, last_alex, now_az), now_az)
     ledger.record_message_outcome(message_id, "classified", cls)
     intent = cls["intent"]
     log.info("reply %s intent=%s%s", thread_id, intent,
@@ -583,7 +584,9 @@ def handle_alex_owned_reply(thread_id, doc, msgs, renter_text, message_id) -> st
     if not event_id and doc.get("state") != ledger.BOOKED:
         return "skipped:alex-owned"
     last_alex = next((gm.msg_body(m) for m in reversed(msgs) if gm.is_from_alex(m)), "")
-    cls = llm.classify_reply(renter_text, last_alex, datetime.now(AZ_TZ))
+    cls = rules.snap_weekday_dates(
+        llm.classify_reply(renter_text, last_alex, datetime.now(AZ_TZ)),
+        datetime.now(AZ_TZ))
     if cls["intent"] != "cancellation":
         return "skipped:alex-owned"
     ledger.record_message_outcome(message_id, "classified", cls)
