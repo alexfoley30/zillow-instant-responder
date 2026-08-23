@@ -460,6 +460,11 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
     ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
                       booked_start_iso=existing["start_az"].isoformat(),
                       agent="Alex Foley")
+    try:
+        gm.poke_ping(f"Booked (added to existing showing): {first_name} - "
+                     f"{address.split(',')[0]} - {existing['when_human']}. [FYI]")
+    except Exception as e:  # noqa: BLE001
+        log.error("fold FYI ping failed: %s", e)
     return "sent"
 
 
@@ -554,8 +559,16 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
             log.error("label failed after booking: %s", e)
         ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
                           booked_start_iso=start_az.isoformat(), agent=agent["name"])
-        if jace_ping:
-            gm.poke_ping(jace_ping)
+        # Booked FYI on EVERY booking (Alex 2026-08-23: v2 only pinged cover
+        # assignments; regular bookings reached the calendar but never his
+        # phone). Cover bookings keep the urgent reply-fast copy.
+        try:
+            gm.poke_ping(jace_ping or (
+                f"Booked: {first_name} - {address.split(',')[0]} - "
+                f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} with "
+                f"{agent['name'].split()[0]}. [FYI]"))
+        except Exception as e:  # noqa: BLE001
+            log.error("booked FYI ping failed: %s", e)
         return "sent"
 
     # No candidate survived validation -> counter with nearest valid slots.
