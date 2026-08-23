@@ -321,6 +321,23 @@ def modify_labels(thread_id: str, add: list, remove: list) -> dict:
     })
 
 
+def alert_email(subject: str, body: str) -> bool:
+    """Poke-independent escalation channel (2026-08-23: Poke returned
+    success while silently swallowing every pipeline ping - Alec's question
+    escalated into a void for hours). Plain email to Alex; his phone's Gmail
+    notification is the delivery guarantee."""
+    try:
+        composio_execute("GMAIL_SEND_EMAIL", {
+            "recipient_email": ALEX_EMAIL,
+            "subject": subject,
+            "body": body,
+        })
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.error("alert email failed: %s", e)
+        return False
+
+
 def poke_ping(message: str) -> bool:
     """One of the three sanctioned pings. No-op (False) if POKE_ENDPOINT unset."""
     if not POKE_ENDPOINT:

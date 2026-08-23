@@ -64,6 +64,11 @@ def dry_run() -> bool:
     return os.environ.get("DRY_RUN", "true").strip().lower() != "false"
 
 
+_CLOSER_RE = re.compile(
+    r"^\W*(?:(?:ok(?:ay)?|k|thanks?(?: you)?(?: so much)?(?: a lot)?|"
+    r"got it|sounds? good|perfect|great|awesome|cool|no problem|you too|"
+    r"will do|appreciate (?:it|you))[,.!\s]*){1,3}$", re.IGNORECASE)
+
 SUBJECT_RE = re.compile(
     r"^(?:Re:\s*)?(?P<name>[A-Za-z][\w'’.-]*)\s+is\s+requesting\s+"
     r"(?:information about|an application for|(?:to|a) tour(?: of)?)\s+"
@@ -154,7 +159,18 @@ def needs_human(thread_id: str, first_name: str, address: str, last_line: str):
         ledger.write_shadow(thread_id, f"poke__{ledger.content_hash(msg)}",
                             {"would_poke": msg})
     else:
-        gm.poke_ping(msg)
+        try:
+            gm.poke_ping(msg)
+        except Exception as e:  # noqa: BLE001
+            log.error("poke ping failed: %s", e)
+        # Poke has returned success while delivering nothing (2026-08-23),
+        # so every escalation ALSO goes out as email - the channel Alex
+        # provably sees. Same 1/day/thread rate limit as the ping above.
+        gm.alert_email(
+            f"Needs you: {first_name} - {address.split(',')[0]}",
+            msg + "\n\nSent by the Zillow pipeline (email backup channel; "
+                  "Poke delivery is unreliable). Reply to the renter via the "
+                  "thread in Gmail, or answer this Needs-you in chat.")
         ledger.upsert_thread(thread_id, last_needs_human_ping_at=datetime.now(AZ_TZ))
 
 
@@ -285,6 +301,13 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
         llm.classify_reply(renter_text, last_alex, now_az), now_az)
     ledger.record_message_outcome(message_id, "classified", cls)
     intent = cls["intent"]
+    # Deterministic override (Alec 2026-08-23: "Okay thank you" classified
+    # accept_offer and booked him into a stranger's showing). Pure-courtesy
+    # text can close a loop; it can never book, cancel, or negotiate.
+    if _CLOSER_RE.match(renter_text or "") and intent not in ("benign_closer",):
+        log.info("closer override %s: %r was %s", thread_id,
+                 renter_text[:40], intent)
+        intent = "benign_closer"
     log.info("reply %s intent=%s%s", thread_id, intent,
              " (regex-fallback)" if cls.get("_fallback") else "")
 
@@ -332,7 +355,25 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
         return "no-send:applied"
 
     if intent == "accept_offer":
-        return book_accepted_offer(thread_id, doc, first_name, address, relay, message_id)
+        # A yes only books against a LIVE offer (Alec 2026-08-23: week-stale
+        # BOOKED thread + courtesy text booked him into Jessica's showing).
+        offer_live = state == ledger.OFFERED
+        if not offer_live:
+            try:
+                off = doc.get("offered_start_iso")
+                offer_live = bool(off) and datetime.fromisoformat(off) > now_az
+            except (ValueError, TypeError):
+                pass
+        if not offer_live:
+            offer_live = doc.get("last_reply_template") in (
+                "offer_existing", "offer_existing_p2", "offer_existing_reply",
+                "propose_times", "counter")
+        if offer_live:
+            return book_accepted_offer(thread_id, doc, first_name, address,
+                                       relay, message_id)
+        needs_human(thread_id, first_name, address,
+                    f"sounded like a yes but no live offer stands: {renter_text[:60]}")
+        return "no-send:accept-no-live-offer"
 
     if intent == "propose_time":
         return book_proposed_time(thread_id, doc, first_name, address, relay,
@@ -357,10 +398,16 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
                     when_h += f" or at {second['start_az'].strftime('%-I:%M %p')}"
                 else:
                     when_h += f" or {second['when_human']}"
-            return send_stage(thread_id, f"reply__{message_id}", relay,
+            result = send_stage(thread_id, f"reply__{message_id}", relay,
                               T.offer_existing_reply(first_name, when_h),
                               [AWAITING_LABEL], [],
                               {"template": "offer_existing_reply"}, message_id)
+            if result == "sent":
+                ledger.transition(
+                    thread_id, ledger.OFFERED,
+                    offered_start_iso=slots[0]["start_az"].isoformat(),
+                    offered_event_id=slots[0]["event"].get("id", ""))
+            return result
         # NEVER the same email twice (Alex 2026-08-23, Melissa: two identical
         # windows-asks in a row read robotic). And a flexible same-day renter
         # ("anytime today") gets concrete times, not a menu - or a needs-you

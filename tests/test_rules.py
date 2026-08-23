@@ -150,3 +150,15 @@ def test_snap_next_weekday_rolls_forward_on_mismatch():
     c2 = _snap("next Friday", "2026-08-28", now)
     assert c2["date"] == "2026-08-28"
     assert "weekday_snapped" not in c2
+
+
+# --------------------------------- courtesy-closer override (8/23 Alec)
+
+def test_closer_regex_matches_courtesy_only():
+    import responder as R
+    for t in ["Okay thank you", "ok", "Thanks!", "sounds good", "Perfect.",
+              "got it", "Thank you so much!"]:
+        assert R._CLOSER_RE.match(t), t
+    for t in ["Ok can we do 2pm", "thanks, does Friday work?",
+              "Perfect, see you at 11", "ok I have a question"]:
+        assert not R._CLOSER_RE.match(t), t
