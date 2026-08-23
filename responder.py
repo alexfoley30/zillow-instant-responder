@@ -125,6 +125,10 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
         return "skipped:send-failed"
 
     ledger.mark_sent(thread_id, stage_key)
+    try:
+        ledger.upsert_thread(thread_id, last_reply_template=meta.get("template"))
+    except Exception:  # noqa: BLE001 - bookkeeping only, never blocks
+        pass
 
     try:
         if labels_add or labels_remove:
@@ -357,6 +361,42 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
                               T.offer_existing_reply(first_name, when_h),
                               [AWAITING_LABEL], [],
                               {"template": "offer_existing_reply"}, message_id)
+        # NEVER the same email twice (Alex 2026-08-23, Melissa: two identical
+        # windows-asks in a row read robotic). And a flexible same-day renter
+        # ("anytime today") gets concrete times, not a menu - or a needs-you
+        # ping when today is unbookable.
+        flexible = bool(re.search(
+            r"any ?time|whenever|flexible|as soon as|asap|see someone today",
+            renter_text or "", re.IGNORECASE))
+        repeat = (doc or {}).get("last_reply_template") == "windows_ask"
+        wants_today = bool(cls.get("wants_same_day"))
+        if flexible or repeat or wants_today:
+            try:
+                events = cal.list_events(3)
+            except Exception as e:  # noqa: BLE001
+                log.error("vague slot fetch failed: %s", e)
+                events = []
+            cand = []
+            try:
+                cand = cal.counter_slots(address, events, now_az=now_az) if address else []
+            except Exception as e:  # noqa: BLE001
+                log.error("vague counter_slots failed: %s", e)
+            if cand:
+                today_missed = wants_today and cand[0].date() != now_az.date()
+                if today_missed:
+                    needs_human(thread_id, first_name, address,
+                                f"wants TODAY, earliest bookable is "
+                                f"{cal.fmt_showing_time(cand[0])}: {renter_text[:60]}")
+                return send_stage(
+                    thread_id, f"reply__{message_id}", relay,
+                    T.propose_times(first_name,
+                                    [cal.fmt_showing_time(s) for s in cand],
+                                    today_closed=today_missed),
+                    [AWAITING_LABEL], [], {"template": "propose_times"},
+                    message_id)
+            needs_human(thread_id, first_name, address,
+                        f"flexible renter, no valid slots to offer: {renter_text[:60]}")
+            return "no-send:needs-human"
         return send_stage(thread_id, f"reply__{message_id}", relay,
                           T.windows_ask(first_name), [AWAITING_LABEL], [],
                           {"template": "windows_ask"}, message_id)
@@ -631,7 +671,7 @@ def route_message(thread_id: str, subject: str, sender: str, message_id: str) ->
         ledger.record_message_outcome(message_id, "empty-thread")
         return "skipped:empty-thread"
 
-    renter_msg = gm.last_renter_message(msgs)
+    renter_msg = gm.message_by_id(msgs, message_id) or gm.last_renter_message(msgs)
     renter_text = gm.extract_renter_text(renter_msg) if renter_msg else ""
 
     if renter_text and not ledger.claim_content_hash(thread_id, renter_text):

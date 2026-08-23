@@ -207,3 +207,26 @@ def test_llm_schema_has_cancel_reason():
     import llm
     assert "cancel_reason" in llm.SCHEMA["properties"]
     assert "cancel_reason" in llm.SCHEMA["required"]
+
+
+# ---------------------------- 8/23 Melissa batch: race + never-repeat + flex
+
+def test_message_by_id_prefers_trigger_message():
+    msgs = [
+        {"messageId": "aaa", "sender": "Melissa <x@convo.zillow.com>",
+         "messageText": "I can do 2pm today!"},
+        {"messageId": "bbb", "sender": "Melissa <x@convo.zillow.com>",
+         "messageText": "or anytime today"},
+    ]
+    hit = gm.message_by_id(msgs, "aaa")
+    assert hit and hit["messageId"] == "aaa"
+    assert gm.message_by_id(msgs, "zzz") is None
+
+
+def test_propose_times_template_variants():
+    body = T.propose_times("Melissa", ["today, Sunday, at 4:00 PM"])
+    assert "4:00 PM" in body and "lock it in" in body
+    assert "wrapped up" not in body
+    closed = T.propose_times("Melissa", ["tomorrow, Monday, at 10:00 AM"],
+                             today_closed=True)
+    assert "wrapped up" in closed and "10:00 AM" in closed

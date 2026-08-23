@@ -133,6 +133,19 @@ def is_from_relay(m: dict) -> bool:
     return "convo.zillow.com" in msg_sender(m)
 
 
+def message_by_id(msgs: list, message_id: str) -> dict | None:
+    """The TRIGGERING message, not whoever spoke last (Melissa 2026-08-23:
+    'I can do 2pm today!' and 'or anytime today' arrived 13 seconds apart;
+    processing the first webhook against the LAST renter message swallowed
+    the exact time entirely). Returns None for Alex-sent or unknown ids."""
+    if not message_id:
+        return None
+    for m in msgs or []:
+        if m.get("messageId") == message_id:
+            return None if is_from_alex(m) else m
+    return None
+
+
 def last_renter_message(msgs: list) -> dict | None:
     """Newest message from the Zillow relay, or None."""
     for m in reversed(msgs):

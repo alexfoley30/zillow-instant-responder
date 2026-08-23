@@ -116,6 +116,24 @@ def offer_existing_reply(first_name, when_human):
     )
 
 
+def propose_times(first_name, slots_human, today_closed=False):
+    """Concrete-slot offer for flexible/repeat vague renters (Alex 2026-08-23:
+    never send the same ask twice; an 'anytime today' renter gets times, not
+    a menu). slots_human: 1-2 formatted times."""
+    lines = "\n".join(f"   {s} (Arizona time)" for s in slots_human)
+    opener = ("Today's showing window has wrapped up on my end, but here's "
+              "the very next opening I have:" if today_closed else
+              "Let's make this easy - here's what I can do:")
+    return (
+        f"Hi {first_name},\n\n"
+        f"{opener}\n\n"
+        f"{lines}\n\n"
+        "Say the word and I'll lock it in for you. If neither works, send me "
+        "a day and time and I'll make it happen.\n\n"
+        f"{SIGNATURE}"
+    )
+
+
 def windows_ask(first_name):
     """Vague time ('sometime this weekend') - ask for an exact time."""
     return (
