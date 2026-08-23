@@ -338,8 +338,28 @@ def alert_email(subject: str, body: str) -> bool:
         return False
 
 
+POKE_V2_URL = "https://poke.com/api/v1/inbound/api-message"
+POKE_API_KEY = os.environ.get("POKE_API_KEY", "")
+
+
 def poke_ping(message: str) -> bool:
-    """One of the three sanctioned pings. No-op (False) if POKE_ENDPOINT unset."""
+    """One of the three sanctioned pings. Prefers the v2 Bearer endpoint
+    (2026-08-23: the legacy ingest URL returned success while delivering
+    nothing; v2 key lives in Render env POKE_API_KEY, minted at
+    poke.com/kitchen). Falls back to legacy POKE_ENDPOINT, then no-op."""
+    if POKE_API_KEY:
+        try:
+            req = urllib.request.Request(
+                POKE_V2_URL,
+                data=json.dumps({"message": message}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {POKE_API_KEY}"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                r.read()
+                return True
+        except Exception as e:  # noqa: BLE001
+            log.error("poke v2 ping failed (falling back to legacy): %s", e)
     if not POKE_ENDPOINT:
         log.warning("POKE_ENDPOINT not configured - ping skipped: %s", message[:80])
         return False
