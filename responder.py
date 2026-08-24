@@ -145,14 +145,20 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
     return "sent"
 
 
-def needs_human(thread_id: str, first_name: str, address: str, last_line: str):
-    """Escalate: state + rate-limited needs-you Poke (1/day/thread)."""
+def needs_human(thread_id: str, first_name: str, address: str, last_line: str,
+                urgent: bool = False):
+    """Escalate: state + needs-you Poke. Rate limit is 1/day/thread EXCEPT
+    urgent (same-day / time-sensitive) escalations, which always ping (Alex
+    2026-08-24, Makynna: her 5pm-today acceptance was silently swallowed by
+    the daily limit)."""
     doc = ledger.get_thread(thread_id) or {}
     last_ping = doc.get("last_needs_human_ping_at")
     ledger.transition(thread_id, ledger.NEEDS_HUMAN)
-    if last_ping and (datetime.now(AZ_TZ).astimezone(last_ping.tzinfo) - last_ping) < timedelta(days=1):
+    if (not urgent and last_ping and
+            (datetime.now(AZ_TZ).astimezone(last_ping.tzinfo) - last_ping) < timedelta(days=1)):
         return
-    msg = (f'Needs you: {first_name} — {address.split(",")[0]} — '
+    tag = "URGENT same-day: " if urgent else "Needs you: "
+    msg = (f'{tag}{first_name} — {address.split(",")[0]} — '
            f'"{(last_line or "")[:80]}". Reply with your answer and I will '
            f'send it to the renter. [zt:{thread_id}]')
     if dry_run():
@@ -167,7 +173,7 @@ def needs_human(thread_id: str, first_name: str, address: str, last_line: str):
         # so every escalation ALSO goes out as email - the channel Alex
         # provably sees. Same 1/day/thread rate limit as the ping above.
         gm.alert_email(
-            f"Needs you: {first_name} - {address.split(',')[0]}",
+            f"{tag}{first_name} - {address.split(',')[0]}",
             msg + "\n\nSent by the Zillow pipeline (email backup channel; "
                   "Poke delivery is unreliable). Reply to the renter via the "
                   "thread in Gmail, or answer this Needs-you in chat.")
@@ -369,10 +375,34 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
                 "offer_existing", "offer_existing_p2", "offer_existing_reply",
                 "propose_times", "counter")
         if offer_live:
+            if not doc.get("offered_event_id"):
+                # Proposal-backed offer (propose_times / counter): the yes
+                # books the proposed slot itself through the full validated
+                # path - agent pick, event creation, urgent same-day ping.
+                pick = None
+                for iso in doc.get("proposed_slots_iso") or []:
+                    try:
+                        c_dt = datetime.fromisoformat(iso)
+                        if c_dt > now_az:
+                            pick = c_dt
+                            break
+                    except (ValueError, TypeError):
+                        continue
+                if pick:
+                    cls_slot = dict(cls)
+                    cls_slot["time_candidates"] = [{
+                        "date": pick.date().isoformat(),
+                        "time": pick.strftime("%H:%M"),
+                        "after": None, "before": None,
+                        "raw": "accepted proposed slot"}]
+                    return book_proposed_time(thread_id, doc, first_name,
+                                              address, relay, cls_slot,
+                                              message_id, now_az)
             return book_accepted_offer(thread_id, doc, first_name, address,
                                        relay, message_id)
         needs_human(thread_id, first_name, address,
-                    f"sounded like a yes but no live offer stands: {renter_text[:60]}")
+                    f"sounded like a yes but no live offer stands: {renter_text[:60]}",
+                    urgent=True)
         return "no-send:accept-no-live-offer"
 
     if intent == "propose_time":
@@ -433,14 +463,23 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
                 if today_missed:
                     needs_human(thread_id, first_name, address,
                                 f"wants TODAY, earliest bookable is "
-                                f"{cal.fmt_showing_time(cand[0])}: {renter_text[:60]}")
-                return send_stage(
+                                f"{cal.fmt_showing_time(cand[0])}: {renter_text[:60]}",
+                                urgent=True)
+                result = send_stage(
                     thread_id, f"reply__{message_id}", relay,
                     T.propose_times(first_name,
                                     [cal.fmt_showing_time(s) for s in cand],
                                     today_closed=today_missed),
                     [AWAITING_LABEL], [], {"template": "propose_times"},
                     message_id)
+                if result == "sent":
+                    # A proposal must be bookable when accepted (Makynna
+                    # 2026-08-24: her yes to a proposed slot dead-ended in
+                    # NEEDS_HUMAN because no event existed behind it).
+                    ledger.upsert_thread(
+                        thread_id,
+                        proposed_slots_iso=[c.isoformat() for c in cand])
+                return result
             needs_human(thread_id, first_name, address,
                         f"flexible renter, no valid slots to offer: {renter_text[:60]}")
             return "no-send:needs-human"
@@ -466,7 +505,8 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
         # 8/5: both got "what day works?" right after saying yes). Asking
         # again reads clueless; a human knows what was agreed.
         needs_human(thread_id, first_name, address,
-                    "accepted a time but no matching calendar event - book it")
+                    "accepted a time but no matching calendar event - book it",
+                    urgent=True)
         return "no-send:accept-without-event"
 
     event_id = existing["event"].get("id", "")
@@ -627,10 +667,14 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
     if not slots:
         needs_human(thread_id, first_name, address, "no valid slots to counter")
         return "no-send:needs-human"
-    return send_stage(thread_id, f"reply__{message_id}", relay,
+    result = send_stage(thread_id, f"reply__{message_id}", relay,
                       T.counter_proposal(first_name,
                                          [cal.fmt_showing_time(s) for s in slots]),
                       [AWAITING_LABEL], [], {"template": "counter"}, message_id)
+    if result == "sent":
+        ledger.upsert_thread(thread_id,
+                             proposed_slots_iso=[c.isoformat() for c in slots])
+    return result
 
 
 def handle_cancellation(thread_id, doc, first_name, relay, message_id,
