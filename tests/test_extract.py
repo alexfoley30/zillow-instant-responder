@@ -169,5 +169,13 @@ def main():
     return 0
 
 
+def test_extract_suite():
+    """Pytest entry: this file predates pytest here and ran only as a script,
+    so `pytest tests/` silently collected ZERO of these regressions (audit
+    8/25). main() returns the failure count; 0 means all checks pass."""
+    FAILURES.clear()
+    assert main() == 0, "\n".join(FAILURES)
+
+
 if __name__ == "__main__":
     sys.exit(main())

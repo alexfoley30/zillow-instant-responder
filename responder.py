@@ -69,6 +69,29 @@ _CLOSER_RE = re.compile(
     r"got it|sounds? good|perfect|great|awesome|cool|no problem|you too|"
     r"will do|appreciate (?:it|you))[,.!\s]*){1,3}$", re.IGNORECASE)
 
+# Within a courtesy closer, these tokens are an actual YES ("Sounds good!"
+# answering "say the word and I'll lock it in" IS the word - 8/25 audit:
+# the blanket closer override was silently dropping real acceptances of
+# live offers, dead-ending renters who believed they were booked).
+_AFFIRM_RE = re.compile(
+    r"(sounds? good|perfect|great|awesome|will do|works)", re.IGNORECASE)
+
+
+def _offer_is_live(doc, now_az) -> bool:
+    """A standing offer the renter could be saying yes to."""
+    doc = doc or {}
+    if doc.get("state") == ledger.OFFERED:
+        return True
+    try:
+        off = doc.get("offered_start_iso")
+        if off and datetime.fromisoformat(off) > now_az:
+            return True
+    except (ValueError, TypeError):
+        pass
+    return doc.get("last_reply_template") in (
+        "offer_existing", "offer_existing_p2", "offer_existing_reply",
+        "propose_times", "counter")
+
 SUBJECT_RE = re.compile(
     r"^(?:Re:\s*)?(?P<name>[A-Za-z][\w'’.-]*)\s+is\s+requesting\s+"
     r"(?:information about|an application for|(?:to|a) tour(?: of)?)\s+"
@@ -307,13 +330,30 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
         llm.classify_reply(renter_text, last_alex, now_az), now_az)
     ledger.record_message_outcome(message_id, "classified", cls)
     intent = cls["intent"]
-    # Deterministic override (Alec 2026-08-23: "Okay thank you" classified
-    # accept_offer and booked him into a stranger's showing). Pure-courtesy
-    # text can close a loop; it can never book, cancel, or negotiate.
+    # Deterministic closer handling (Alec 2026-08-23 + audit 2026-08-25).
+    # No live offer: courtesy text can close a loop but never book, cancel,
+    # or negotiate (Alec: "Okay thank you" on a stale thread booked him into
+    # a stranger's showing). WITH a live offer standing, an affirmative
+    # closer ("Sounds good!") is the acceptance our own template asked for,
+    # and a bare "okay thanks" is ambiguous - a human decides, urgently,
+    # instead of the thread dying in silence.
     if _CLOSER_RE.match(renter_text or "") and intent not in ("benign_closer",):
-        log.info("closer override %s: %r was %s", thread_id,
-                 renter_text[:40], intent)
-        intent = "benign_closer"
+        if _offer_is_live(doc, now_az):
+            if _AFFIRM_RE.search(renter_text or ""):
+                log.info("closer affirm w/ live offer %s: %r -> accept_offer",
+                         thread_id, renter_text[:40])
+                intent = "accept_offer"
+            else:
+                log.info("closer ambiguous w/ live offer %s: %r -> human",
+                         thread_id, renter_text[:40])
+                needs_human(thread_id, first_name, address,
+                            f"courtesy reply while an offer stands - did they "
+                            f"accept? {renter_text[:60]}", urgent=True)
+                return "no-send:closer-ambiguous"
+        else:
+            log.info("closer override %s: %r was %s", thread_id,
+                     renter_text[:40], intent)
+            intent = "benign_closer"
     log.info("reply %s intent=%s%s", thread_id, intent,
              " (regex-fallback)" if cls.get("_fallback") else "")
 
@@ -363,18 +403,7 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
     if intent == "accept_offer":
         # A yes only books against a LIVE offer (Alec 2026-08-23: week-stale
         # BOOKED thread + courtesy text booked him into Jessica's showing).
-        offer_live = state == ledger.OFFERED
-        if not offer_live:
-            try:
-                off = doc.get("offered_start_iso")
-                offer_live = bool(off) and datetime.fromisoformat(off) > now_az
-            except (ValueError, TypeError):
-                pass
-        if not offer_live:
-            offer_live = doc.get("last_reply_template") in (
-                "offer_existing", "offer_existing_p2", "offer_existing_reply",
-                "propose_times", "counter")
-        if offer_live:
+        if _offer_is_live(doc, now_az):
             if not doc.get("offered_event_id"):
                 # Proposal-backed offer (propose_times / counter): the yes
                 # books the proposed slot itself through the full validated
@@ -493,10 +522,19 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
 
 
 def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) -> str:
-    """Renter said yes to the offered existing slot -> fold in + confirm."""
+    """Renter said yes to the offered existing slot -> fold in + confirm.
+    Books against the EVENT THAT WAS OFFERED when the thread recorded one -
+    the soonest showing is only the fallback (audit 8/25: a showing created
+    between offer and yes could hijack the fold onto the wrong time)."""
     existing = None
     try:
-        existing = cal.find_existing_showing(address)
+        shows = cal.find_existing_showings(address)
+        want = (doc or {}).get("offered_event_id") or ""
+        if want:
+            existing = next(
+                (s for s in shows if s["event"].get("id") == want), None)
+        if existing is None:
+            existing = shows[0] if shows else None
     except Exception as e:  # noqa: BLE001
         log.error("accept_offer lookup failed: %s", e)
     if not existing:
@@ -510,13 +548,14 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
         return "no-send:accept-without-event"
 
     event_id = existing["event"].get("id", "")
+    agent_name = cal.agent_name_from_event(existing["event"])
     stage = f"booked__{event_id}"
     if dry_run():
         ledger.write_shadow(thread_id, stage, {
             "would_calendar": {"fold": True, "event_id": event_id,
                                "renter": first_name},
             "would_body": T.booking_confirmation(
-                first_name, address, existing["when_human"], "Alex Foley"),
+                first_name, address, existing["when_human"], agent_name),
         })
         return "shadowed"
 
@@ -534,7 +573,7 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
     try:
         cal.fold_renter_into_event(existing["event"], first_name)  # event FIRST
         gm.send_reply(thread_id, relay, T.booking_confirmation(
-            first_name, address, existing["when_human"], "Alex Foley"))
+            first_name, address, existing["when_human"], agent_name))
     except Exception as e:  # noqa: BLE001
         ledger.mark_failed(thread_id, stage, str(e))
         return "skipped:book-failed"
@@ -546,7 +585,7 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
         log.error("label failed after fold: %s", e)
     ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
                       booked_start_iso=existing["start_az"].isoformat(),
-                      agent="Alex Foley")
+                      agent=agent_name)
     try:
         gm.poke_ping(f"Booked (added to existing showing): {first_name} - "
                      f"{address.split(',')[0]} - {existing['when_human']}. [FYI]")
@@ -693,8 +732,16 @@ def handle_cancellation(thread_id, doc, first_name, relay, message_id,
     if event_id:
         try:
             # Fold-aware: shared consolidated events survive one renter's
-            # cancel; only a solo event is deleted (Alex 2026-08-22).
-            cal.remove_renter_or_cancel(event_id, doc.get("renter_name") or "")
+            # cancel; only a solo event is deleted (Alex 2026-08-22). An
+            # unparseable event is KEPT and a human untangles the calendar.
+            outcome = cal.remove_renter_or_cancel(
+                event_id, doc.get("renter_name") or "")
+            if outcome == "kept-unparsed":
+                needs_human(thread_id, first_name,
+                            address or doc.get("property_address") or "",
+                            "cancel received but their calendar event couldn't "
+                            "be safely edited - clean it up by hand",
+                            urgent=True)
         except Exception as e:  # noqa: BLE001
             log.error("cancel/remove failed (continuing): %s", e)
     next_when = None
@@ -743,7 +790,8 @@ def handle_alex_owned_reply(thread_id, doc, msgs, renter_text, message_id) -> st
     if event_id:
         try:
             # Fold-aware: shared consolidated events survive one renter's
-            # cancel; only a solo event is deleted (Alex 2026-08-22).
+            # cancel; only a solo event is deleted (Alex 2026-08-22). Kept-
+            # unparsed needs no extra ping here - this path already escalates.
             cal.remove_renter_or_cancel(event_id, doc.get("renter_name") or "")
         except Exception as e:  # noqa: BLE001
             log.error("cancel/remove failed (continuing): %s", e)
@@ -840,11 +888,6 @@ def route_message(thread_id: str, subject: str, sender: str, message_id: str) ->
                              reconstructed=True)
         doc = ledger.get_thread(thread_id)
 
-    if renter_msg is None or gm.msg_id(renter_msg) != (message_id or gm.msg_id(renter_msg)):
-        # The triggering message isn't the newest renter message; process the
-        # newest one (idempotency keys keep this safe).
-        pass
-
     try:
         out = handle_reply(thread_id, doc, msgs, renter_text,
                            message_id or gm.msg_id(renter_msg or {}) or thread_id)
@@ -911,14 +954,23 @@ class Handler(BaseHTTPRequestHandler):
                 first_name = doc.get("renter_name") or "there"
                 # Alex may have already answered by hand (Jamie 8/22: manual
                 # reply at 1:16 PM, approved send 3 min later = double
-                # apology). If the LAST message in the thread is from Alex,
-                # skip unless the caller passes force:true.
+                # apology). But the pipeline's own acks also come from Alex's
+                # address, and blocking on those ate approved answers (audit
+                # 8/25: inquiry ack -> ping -> approved answer returned
+                # skipped:alex-replied-last). Only a MANUAL reply blocks:
+                # an Alex message NEWER than our needs-you ping.
                 if not payload.get("force"):
                     try:
                         msgs_chk = gm.fetch_thread(thread_id)
                         if msgs_chk and gm.is_from_alex(msgs_chk[-1]):
-                            self._send(200, "skipped:alex-replied-last")
-                            return
+                            ping_at = doc.get("last_needs_human_ping_at")
+                            m_at = gm.msg_time(msgs_chk[-1])
+                            manual = True
+                            if ping_at is not None and m_at is not None:
+                                manual = m_at > ping_at
+                            if manual:
+                                self._send(200, "skipped:alex-replied-last")
+                                return
                     except Exception as e:  # noqa: BLE001
                         log.error("send-approved freshness check failed "
                                   "(continuing): %s", e)

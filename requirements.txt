@@ -1,5 +1,7 @@
 firebase-admin==7.5.0
-anthropic>=0.116.0
+# Pinned 2026-08-25 (audit): floating >= in a pins-load-bearing file invites
+# the exact surprise the 8/24 outage came from. 1.0.0 = deployed baseline.
+anthropic==1.0.0
 # Pinned 2026-08-24 after a fresh Render rebuild went fail-closed with
 # '400 Invalid database id %28default%29' on every Firestore call. Culprit
 # isolated locally: google-api-core 2.35.0 percent-encodes the database

@@ -13,6 +13,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 log = logging.getLogger("zillow-instant.gmail")
 
@@ -67,6 +68,29 @@ def msg_sender(m: dict) -> str:
 
 def msg_id(m: dict) -> str:
     return m.get("messageId") or m.get("message_id") or m.get("id") or ""
+
+
+def msg_time(m: dict):
+    """Best-effort tz-aware timestamp of a Composio message, or None.
+    Tries messageTimestamp (ISO), internalDate (epoch ms), then the RFC2822
+    Date header. Callers must treat None as 'unknown' and fail safe."""
+    ts = m.get("messageTimestamp") or m.get("internalDate") or m.get("date")
+    if not ts:
+        return None
+    try:
+        if isinstance(ts, str) and ts.strip().isdigit():
+            ts = int(ts.strip())
+        if isinstance(ts, (int, float)):
+            secs = ts / 1000 if ts > 1e12 else ts
+            return datetime.fromtimestamp(secs, tz=timezone.utc)
+        s = str(ts).strip()
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            from email.utils import parsedate_to_datetime
+            return parsedate_to_datetime(s)
+    except (ValueError, TypeError, OSError, OverflowError):
+        return None
 
 
 _HTML_BLOCK_RE = re.compile(r"<(script|style|head)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL)

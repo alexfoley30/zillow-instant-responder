@@ -236,9 +236,13 @@ def snap_weekday_dates(cls: dict, now_az: datetime) -> dict:
     from datetime import date as _date, timedelta as _td
     for c in cls.get("time_candidates") or []:
         raw = (c.get("raw") or "").lower()
-        named = next((wd for name, wd in _WEEKDAYS.items() if name in raw), None)
-        if named is None:
+        named_all = {wd for name, wd in _WEEKDAYS.items() if name in raw}
+        if len(named_all) != 1:
+            # Zero named weekdays, or several ("Saturday or Sunday works") -
+            # snapping to dict order would override a correct model pick
+            # (audit 8/25). Ambiguity trusts the model.
             continue
+        named = named_all.pop()
         parsed = None
         try:
             parsed = _date.fromisoformat(c.get("date") or "")

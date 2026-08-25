@@ -198,7 +198,7 @@ def validate_slot(start_az: datetime, address: str, events: list,
                 gap = rules.drive_gap_minutes(address, ev_addr)
                 if (s_az >= end_az and (s_az - end_az) < timedelta(minutes=gap)) or \
                    (e_az <= start_az and (start_az - e_az) < timedelta(minutes=gap)):
-                    agent, jace_cover = rules.JACE, "drive-gap"
+                    agent, jace_cover = rules.RHETT, "drive-gap"
                     break
 
     return {"ok": True, "agent": agent, "same_day": same_day, "jace_cover": jace_cover}
@@ -217,6 +217,50 @@ def counter_slots(address: str, events: list, now_az: datetime = None,
 
 # ---------------------------------------------------------------- writes
 
+# Inquirer names on showing events. Canonical format (2026-08-25) is a
+# dedicated line "Inquirers: A, B." but three older formats exist on real
+# events and all must parse: the one-line "Zillow inquiry. Inquirer: Jessica.
+# Agent: Alex Foley (email)." create format, the legacy fold that appended
+# ", Matthew." AFTER the Agent clause, and hand-edited variants. Getting this
+# wrong deleted a shared event on 8/21 and silently kept ghost events until
+# the 8/25 audit caught that the "fixed" parser never matched production text.
+_INQ_RE = re.compile(r"Inquirers?:\s*(.*?)(?=\.?\s*Agent:|\n|$)", re.IGNORECASE)
+_POST_AGENT_NAMES_RE = re.compile(
+    r"Agent:[^()\n]*\([^)]*\)\s*\.?\s*,\s*(.+)$", re.IGNORECASE | re.DOTALL)
+_AGENT_CLAUSE_RE = re.compile(r"Agent:\s*[^,\n(]+?\([^)]*\)", re.IGNORECASE)
+
+
+def _split_names(blob: str) -> list:
+    return [n.strip(" .\n") for n in blob.split(",") if n.strip(" .\n")]
+
+
+def parse_inquirers(desc: str) -> list:
+    """Every inquirer name recorded on a showing description, any era."""
+    desc = desc or ""
+    m = _INQ_RE.search(desc)
+    if not m:
+        return []
+    names = _split_names(m.group(1))
+    pm = _POST_AGENT_NAMES_RE.search(desc[m.end():])
+    if pm:
+        names += _split_names(pm.group(1))
+    seen, out = set(), []
+    for n in names:
+        if n.lower() not in seen:
+            seen.add(n.lower())
+            out.append(n)
+    return out
+
+
+def _rebuild_description(desc: str, names: list) -> str:
+    """Canonical description carrying `names`, preserving the Agent clause."""
+    out = "Zillow inquiry.\nInquirers: " + ", ".join(names) + "."
+    am = _AGENT_CLAUSE_RE.search(desc or "")
+    if am:
+        out += "\n" + am.group(0).rstrip(".") + "."
+    return out
+
+
 def create_showing_event(address: str, first_name: str, start_az: datetime,
                          agent: dict) -> str:
     """Create the 30-minute showing event. Returns the event id."""
@@ -226,7 +270,7 @@ def create_showing_event(address: str, first_name: str, start_az: datetime,
         "calendarId": "primary",
         "summary": f"Showing — {address.split(',')[0].strip()} with {first_name}",
         "location": address,
-        "description": (f"Zillow inquiry. Inquirer: {first_name}. "
+        "description": (f"Zillow inquiry.\nInquirers: {first_name}.\n"
                         f"Agent: {agent['name']} ({agent['email']})."),
         "start_datetime": start_az.strftime("%Y-%m-%dT%H:%M:%S"),
         "event_duration_minutes": rules.SHOWING_MINUTES,
@@ -242,21 +286,27 @@ def create_showing_event(address: str, first_name: str, start_az: datetime,
     return event_id
 
 
+def agent_name_from_event(event: dict, default: str = "Alex Foley") -> str:
+    """Who actually meets the renter, read off the event itself - fold
+    confirmations used to hardcode Alex while the event said Rhett/Jace."""
+    m = re.search(r"Agent:\s*([^(\n]+?)\s*\(",
+                  str((event or {}).get("description", "")))
+    return m.group(1).strip() if m else default
+
+
 def fold_renter_into_event(event: dict, first_name: str) -> str:
-    """Clustering: append the renter to the existing event's description.
+    """Clustering: append the renter to the existing event's inquirer list.
     NEVER creates a second event. Returns the event id."""
     event_id = event.get("id", "")
-    desc = str(event.get("description", "")).rstrip(". \n")
-    if first_name.lower() in desc.lower():
+    desc = str(event.get("description", ""))
+    names = parse_inquirers(desc)
+    if first_name.strip().lower() in [n.lower() for n in names]:
         return event_id  # already folded (idempotent)
-    if "Inquirer:" in desc:
-        new_desc = desc + f", {first_name}."
-    else:
-        new_desc = (desc + f"\nInquirer: {first_name}.").strip()
+    names.append(first_name.strip())
     composio_execute("GOOGLECALENDAR_UPDATE_EVENT", {
         "calendarId": "primary",
         "event_id": event_id,
-        "description": new_desc,
+        "description": _rebuild_description(desc, names),
         "send_updates": True,
     })
     return event_id
@@ -272,32 +322,43 @@ def cancel_event(event_id: str):
 def remove_renter_or_cancel(event_id: str, first_name: str) -> str:
     """Fold-aware cancellation (Alex ruling 2026-08-22, after one renter's
     cancel deleted a shared consolidated event on 8/21): take this renter off
-    the event's Inquirer list; DELETE the event only when they were the last
-    renter on it. Returns 'removed' | 'canceled'."""
+    the event's inquirer list; DELETE the event only when they were the last
+    renter on it. Deleting is the dangerous branch, so ambiguity fails toward
+    KEEPING the event: 'kept-unparsed' tells the caller a human must look.
+    Returns 'removed' | 'canceled' | 'kept-unparsed'."""
     ev = None
     try:
-        for cand in list_events(7):
+        for cand in list_events(30):
             if cand.get("id") == event_id:
                 ev = cand
                 break
     except Exception as e:  # noqa: BLE001
         log.error("remove_renter lookup failed for %s: %s", event_id, e)
-    desc = str((ev or {}).get("description", ""))
-    m = re.search(r"Inquirer:\s*([^\n]+)", desc)
-    if not ev or not m or not first_name:
-        cancel_event(event_id)
-        return "canceled"
-    names = [n.strip() for n in m.group(1).rstrip(". ").split(",") if n.strip()]
-    remaining = [n for n in names if n.lower() != first_name.strip().lower()]
+    if not ev:
+        # Can't see the event: never blind-delete a possibly-shared showing.
+        return "kept-unparsed"
+    desc = str(ev.get("description", ""))
+    names = parse_inquirers(desc)
+    target = (first_name or "").strip().lower()
+    if not names:
+        # No inquirer list (hand-made or pre-format event). Solo only if the
+        # title reads "... with <this renter>"; a bare substring test would
+        # match renter names hiding inside street names.
+        if target and re.search(rf"with\s+{re.escape(target)}\b",
+                                str(ev.get("summary", "")), re.IGNORECASE):
+            cancel_event(event_id)
+            return "canceled"
+        return "kept-unparsed"
+    if target not in [n.lower() for n in names]:
+        return "kept-unparsed"  # someone else's event - never delete it
+    remaining = [n for n in names if n.lower() != target]
     if not remaining:
         cancel_event(event_id)
         return "canceled"
-    new_line = "Inquirer: " + ", ".join(remaining) + "."
-    new_desc = desc[:m.start()] + new_line + desc[m.end():]
     composio_execute("GOOGLECALENDAR_UPDATE_EVENT", {
         "calendarId": "primary",
         "event_id": event_id,
-        "description": new_desc,
+        "description": _rebuild_description(desc, remaining),
         "send_updates": True,
     })
     return "removed"

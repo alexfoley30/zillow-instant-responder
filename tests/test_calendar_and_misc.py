@@ -172,14 +172,29 @@ def test_body_identity_extraction_empty():
     assert gm.extract_identity_from_body({}) == (None, None)
 
 
-def test_remove_renter_parsing_logic():
-    import re as _re
-    desc = "Zillow inquiry. Inquirer: Sezer, Dylan.\nAgent: Rhett."
-    m = _re.search(r"Inquirer:\s*([^\n]+)", desc)
-    names = [n.strip() for n in m.group(1).rstrip(". ").split(",") if n.strip()]
-    assert names == ["Sezer", "Dylan"]
-    remaining = [n for n in names if n.lower() != "sezer"]
-    assert remaining == ["Dylan"]
+def test_parse_inquirers_production_create_format():
+    # EXACTLY what create_showing_event wrote until 2026-08-25: one line,
+    # names terminated by ". Agent:". The old test invented a \n before
+    # "Agent:" and tested a hand-copied regex, which is how a parser that
+    # never matched production text shipped as "fixed" (audit 8/25).
+    import calendar_logic as cal
+    desc = "Zillow inquiry. Inquirer: Jessica. Agent: Alex Foley (alex@azfoleyhomes.com)."
+    assert cal.parse_inquirers(desc) == ["Jessica"]
+
+
+def test_parse_inquirers_legacy_fold_appended_after_agent():
+    # Legacy fold appended ", Matthew." after the Agent clause.
+    import calendar_logic as cal
+    desc = ("Zillow inquiry. Inquirer: Jessica. "
+            "Agent: Alex Foley (alex@azfoleyhomes.com)., Matthew.")
+    assert cal.parse_inquirers(desc) == ["Jessica", "Matthew"]
+
+
+def test_parse_inquirers_canonical_multiline():
+    import calendar_logic as cal
+    desc = ("Zillow inquiry.\nInquirers: Sezer, Dylan.\n"
+            "Agent: Rhett Lueck (rhettlueck@gmail.com).")
+    assert cal.parse_inquirers(desc) == ["Sezer", "Dylan"]
 
 
 # ------------------------------- reason-aware reschedule (8/22 Jamie battery)

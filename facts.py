@@ -9,6 +9,17 @@ answers are a v1.1 upgrade, only if NEEDS_HUMAN volume annoys Alex.
 import re
 
 # Standing rules (property-facts/README.md). Order matters: first hit wins.
+
+# Nouns a business use must BIND TO before the sublease/business decline
+# fires. The 8/25 audit proved the unbound version auto-declined "my mother
+# uses home health aide visits" (an occupant's care needs - the exact
+# fair-housing failure this rule's own comment forbids) and "I run a small
+# business from my laptop". Re-renting terms (sublease/Airbnb/STR) stay
+# unconditional - they are unambiguous. "corporate housing" was dropped
+# entirely: a company-lease ask is a judgment call, so it escalates through
+# the normal question path instead of auto-declining.
+_PROP = r"(?:the|this|your|my|that) (?:home|house|property|place)"
+
 _RULES = [
     # business operation / sublease / STR arbitrage: blanket brokerage decline
     # (Alex 2026-08-18, Tynisha at New Town asked about running a licensed
@@ -16,13 +27,16 @@ _RULES = [
     # residential-use-only + named-tenants-only, applied uniformly - never the
     # nature of who would live there (fair-housing).
     ("no_business_sublease", re.compile(
-        r"(sub-?let|sub-?lease|re-?rent|rental arbitrage|\barbitrage\b|"
-        r"air ?bnb|\bvrbo\b|short[- ]term rental|corporate housing|"
-        r"(run|operate|start|open|use)\w*[^.\n]{0,40}"
-        r"(business|facility|day ?care|child ?care|group home|care home|"
-        r"assisted living|sober living|home[- ]?health)|"
-        r"business[^.\n]{0,30}(out of|from|at) (the|this) (home|house|property)|"
-        r"operate out of)", re.IGNORECASE)),
+        r"(?:sub-?let|sub-?lease|re-?rent|rental arbitrage|\barbitrage\b|"
+        r"air ?bnb|\bvrbo\b|short[- ]term rental|operate out of|"
+        r"(?:run|operat|start|open)\w*[^.\n]{0,40}"
+        r"(?:business|facility|day ?care|child ?care|group home|care home|"
+        r"assisted living|sober living|home[- ]?health)\w*[^.\n]{0,40}"
+        r"(?:out of|from|at|in)\s+" + _PROP + r"|"
+        r"(?:business|facility)[^.\n]{0,30}(?:out of|from|at)\s+" + _PROP + r"|"
+        r"us(?:e|es|ing)\s+" + _PROP + r"[^.\n]{0,30}(?:as|for)\s[^.\n]{0,30}"
+        r"(?:business|rental|air ?bnb|day ?care|facility|office)"
+        r")", re.IGNORECASE)),
     # floor plans / dimensions / sqft-per-room: always "unavailable, come see it"
     ("floor_plan", re.compile(
         r"(floor ?plan|lay ?out|dimensions|measurements|how (big|large) is the "

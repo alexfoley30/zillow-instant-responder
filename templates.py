@@ -124,11 +124,12 @@ def propose_times(first_name, slots_human, today_closed=False):
     opener = ("Today's showing window has wrapped up on my end, but here's "
               "the very next opening I have:" if today_closed else
               "Let's make this easy - here's what I can do:")
+    neither = "neither works" if len(slots_human) > 1 else "that doesn't work"
     return (
         f"Hi {first_name},\n\n"
         f"{opener}\n\n"
         f"{lines}\n\n"
-        "Say the word and I'll lock it in for you. If neither works, send me "
+        f"Say the word and I'll lock it in for you. If {neither}, send me "
         "a day and time and I'll make it happen.\n\n"
         f"{SIGNATURE}"
     )
@@ -164,8 +165,10 @@ def reschedule_after_cancel(first_name, reason_given=False, next_when=None):
     # their message - acknowledge and skip the why. And when another showing
     # at the home is already on the calendar, offer that exact time first.
     if reason_given:
+        # No bolted-on well-wishes: "hope everything gets sorted" reads wrong
+        # against half the reasons renters actually give (audit 8/25).
         opener = ("No worries at all, thanks for letting me know - I've taken "
-                  "it off the calendar. Hope everything gets sorted quickly!")
+                  "it off the calendar.")
         why = ""
     else:
         opener = ("No problem at all, thanks for the heads up! I've taken it "
@@ -177,11 +180,11 @@ def reschedule_after_cancel(first_name, reason_given=False, next_when=None):
                   "(Arizona time), so just say the word and I'll put you back "
                   "in for that one. Or send me any other day and time that "
                   "works and I'll get you rebooked. Here's what I have open "
-                  "(Phoenix time):\n\n")
+                  "(Arizona time):\n\n")
     else:
         rebook = ("If you'd still like to see the home, send me a day and "
                   "time that works and I'll get you rebooked. Here's what I "
-                  "have open (Phoenix time):\n\n")
+                  "have open (Arizona time):\n\n")
     return (
         f"Hi {first_name},\n\n"
         f"{opener}\n\n"

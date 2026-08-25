@@ -52,10 +52,23 @@ def _recover_stuck():
                 log.info("stuck send backfilled from Gmail: %s", key)
             else:
                 # Never auto-resend from cron: an untraceable half-sent state
-                # goes to a human instead of risking a duplicate.
-                doc = ledger.get_thread(thread_id) or {}
+                # goes to a human instead of risking a duplicate. And a human
+                # must actually HEAR about it (audit 8/25: this path only
+                # logged, then _age_needs_human closed the thread silently at
+                # 7 days - the renter was dropped without anyone being told).
                 ledger.transition(thread_id, ledger.NEEDS_HUMAN)
                 log.warning("stuck send needs human: %s", key)
+                note = (f"Stuck half-sent reply on thread {thread_id} "
+                        f"(stage {stage_key}) - check the Gmail thread before "
+                        "anyone emails this renter.")
+                try:
+                    gm.poke_ping("Needs you: " + note)
+                except Exception as e:  # noqa: BLE001
+                    log.error("stuck-send ping failed: %s", e)
+                try:
+                    gm.alert_email(f"Needs you: stuck send {thread_id}", note)
+                except Exception as e:  # noqa: BLE001
+                    log.error("stuck-send alert email failed: %s", e)
         except Exception as e:  # noqa: BLE001
             log.error("recover check failed %s: %s", key, e)
 
