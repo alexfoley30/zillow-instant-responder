@@ -28,6 +28,7 @@ BLOCKED_ADDRESSES = [
     "3896 E Alfalfa Dr",     # Gilbert 85298 - leased 2026-08-20 ($3,399)
     "736 E Gold Dust Way",   # Gilbert - leased (Alex audit 2026-08-22)
     "300 N Gila Springs Blvd",  # Chandler - leased (Alex audit 2026-08-22)
+    "1110 E Redfield Rd",    # Tempe 85283 - leased 2026-08-25 ($2,999, Courtney)
 ]
 
 
