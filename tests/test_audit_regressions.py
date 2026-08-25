@@ -38,14 +38,27 @@ PROD_FOLDED = ("Zillow inquiry. Inquirer: Jessica. "
 
 
 class _CalendarStub:
-    """Capture composio calls; feed remove_renter_or_cancel a fixed event."""
+    """Capture composio + showings-ledger calls; feed the cancel/fold path a
+    fixed event and an optional ledger renter list (None = legacy event with
+    no zillow_showings doc, so the description parser is the fallback)."""
 
-    def __init__(self, monkeypatch, event):
+    def __init__(self, monkeypatch, event, ledger_renters=None):
         self.calls = []
         self.event = event
+        self.showings = (
+            {} if ledger_renters is None
+            else {(event or {}).get("id"): {"renters": list(ledger_renters)}})
         monkeypatch.setattr(cal, "composio_execute", self._exec)
         monkeypatch.setattr(cal, "list_events",
                             lambda days=7, time_min=None: [event] if event else [])
+        monkeypatch.setattr(cal.ledger, "get_showing", self.showings.get)
+        monkeypatch.setattr(cal.ledger, "upsert_showing", self._upsert)
+        monkeypatch.setattr(cal.ledger, "delete_showing",
+                            lambda eid: self.showings.pop(eid, None))
+
+    def _upsert(self, event_id, **fields):
+        self.showings.setdefault(event_id, {}).update(
+            {k: v for k, v in fields.items() if v is not None})
 
     def _exec(self, slug, params):
         self.calls.append((slug, params))
@@ -120,6 +133,40 @@ def test_fold_renter_named_alex_not_swallowed_by_agent_email(monkeypatch):
     cal.fold_renter_into_event(ev, "Alex")
     update = next(p for s, p in stub.calls if s == "GOOGLECALENDAR_UPDATE_EVENT")
     assert cal.parse_inquirers(update["description"]) == ["Jessica", "Alex"]
+
+
+def test_ledger_renters_beat_description_parsing(monkeypatch):
+    # Phase-A refactor: when a zillow_showings doc exists, it is the
+    # authority - a mangled description no longer decides anything.
+    ev = {"id": "ev1", "summary": "x", "description": "hand-edited garbage"}
+    stub = _CalendarStub(monkeypatch, ev, ledger_renters=["Jessica", "Matthew"])
+    assert cal.remove_renter_or_cancel("ev1", "Jessica") == "removed"
+    assert stub.showings["ev1"]["renters"] == ["Matthew"]
+    assert "GOOGLECALENDAR_DELETE_EVENT" not in stub.slugs()
+
+
+def test_ledger_solo_cancel_removes_showing_doc(monkeypatch):
+    ev = {"id": "ev1", "summary": "x", "description": ""}
+    stub = _CalendarStub(monkeypatch, ev, ledger_renters=["Jessica"])
+    assert cal.remove_renter_or_cancel("ev1", "Jessica") == "canceled"
+    assert "GOOGLECALENDAR_DELETE_EVENT" in stub.slugs()
+    assert "ev1" not in stub.showings
+
+
+def test_fold_writes_showing_ledger(monkeypatch):
+    ev = {"id": "ev1", "summary": "x", "description": PROD_SOLO}
+    stub = _CalendarStub(monkeypatch, ev)  # legacy event, no doc yet
+    cal.fold_renter_into_event(ev, "Sezer")
+    assert stub.showings["ev1"]["renters"] == ["Jessica", "Sezer"]
+
+
+def test_ledger_known_showing_survives_invisible_event(monkeypatch):
+    # Event beyond the lookup window (or already gone): the ledger record
+    # alone is enough to act instead of returning kept-unparsed.
+    stub = _CalendarStub(monkeypatch, None)
+    stub.showings["evX"] = {"renters": ["Jessica", "Matthew"]}
+    assert cal.remove_renter_or_cancel("evX", "Matthew") == "removed"
+    assert stub.showings["evX"]["renters"] == ["Jessica"]
 
 
 def test_agent_name_read_from_event():

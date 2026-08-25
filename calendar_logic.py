@@ -9,6 +9,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
+import ledger
 import rules
 from gmail_client import composio_execute
 
@@ -283,6 +284,13 @@ def create_showing_event(address: str, first_name: str, start_az: datetime,
     event_id = (ev or {}).get("id") or ""
     if not event_id:
         raise RuntimeError(f"create_event returned no id: {str(res)[:200]}")
+    # Ledger record is part of the booking, not bookkeeping: a showing whose
+    # renters can't be recorded must not confirm (same tripwire philosophy
+    # as event-before-email). Raising here lands in the book path's
+    # mark_failed like any other create failure.
+    ledger.upsert_showing(event_id, address=address,
+                          start_iso=start_az.isoformat(),
+                          agent_name=agent["name"], renters=[first_name])
     return event_id
 
 
@@ -294,15 +302,31 @@ def agent_name_from_event(event: dict, default: str = "Alex Foley") -> str:
     return m.group(1).strip() if m else default
 
 
+def _ledger_renters(event_id: str):
+    """Renter list from the showings ledger, or None when no doc exists
+    (pre-refactor event) so callers fall back to description parsing."""
+    try:
+        doc = ledger.get_showing(event_id)
+        if doc and doc.get("renters"):
+            return list(doc["renters"])
+    except Exception as e:  # noqa: BLE001 - legacy parser still covers us
+        log.error("showing ledger read failed for %s: %s", event_id, e)
+    return None
+
+
 def fold_renter_into_event(event: dict, first_name: str) -> str:
     """Clustering: append the renter to the existing event's inquirer list.
-    NEVER creates a second event. Returns the event id."""
+    NEVER creates a second event. Returns the event id. Ledger first, then
+    the description is re-rendered from the full list (one-way)."""
     event_id = event.get("id", "")
     desc = str(event.get("description", ""))
-    names = parse_inquirers(desc)
+    names = _ledger_renters(event_id)
+    if names is None:
+        names = parse_inquirers(desc)
     if first_name.strip().lower() in [n.lower() for n in names]:
         return event_id  # already folded (idempotent)
     names.append(first_name.strip())
+    ledger.upsert_showing(event_id, renters=names)
     composio_execute("GOOGLECALENDAR_UPDATE_EVENT", {
         "calendarId": "primary",
         "event_id": event_id,
@@ -322,10 +346,11 @@ def cancel_event(event_id: str):
 def remove_renter_or_cancel(event_id: str, first_name: str) -> str:
     """Fold-aware cancellation (Alex ruling 2026-08-22, after one renter's
     cancel deleted a shared consolidated event on 8/21): take this renter off
-    the event's inquirer list; DELETE the event only when they were the last
-    renter on it. Deleting is the dangerous branch, so ambiguity fails toward
-    KEEPING the event: 'kept-unparsed' tells the caller a human must look.
-    Returns 'removed' | 'canceled' | 'kept-unparsed'."""
+    the showing's renter list; DELETE the event only when they were the last
+    renter on it. The showings ledger is the authority; the description
+    parser only covers pre-refactor events. Deleting is the dangerous branch,
+    so ambiguity fails toward KEEPING the event: 'kept-unparsed' tells the
+    caller a human must look. Returns 'removed' | 'canceled' | 'kept-unparsed'."""
     ev = None
     try:
         for cand in list_events(30):
@@ -334,31 +359,57 @@ def remove_renter_or_cancel(event_id: str, first_name: str) -> str:
                 break
     except Exception as e:  # noqa: BLE001
         log.error("remove_renter lookup failed for %s: %s", event_id, e)
-    if not ev:
-        # Can't see the event: never blind-delete a possibly-shared showing.
-        return "kept-unparsed"
-    desc = str(ev.get("description", ""))
-    names = parse_inquirers(desc)
+    desc = str((ev or {}).get("description", ""))
+
+    names = _ledger_renters(event_id)
+    if names is None:
+        if not ev:
+            # No ledger record AND can't see the event: never blind-delete a
+            # possibly-shared showing.
+            return "kept-unparsed"
+        names = parse_inquirers(desc)
+
     target = (first_name or "").strip().lower()
     if not names:
-        # No inquirer list (hand-made or pre-format event). Solo only if the
-        # title reads "... with <this renter>"; a bare substring test would
-        # match renter names hiding inside street names.
-        if target and re.search(rf"with\s+{re.escape(target)}\b",
-                                str(ev.get("summary", "")), re.IGNORECASE):
+        # No renter list anywhere (hand-made or pre-format event). Solo only
+        # if the title reads "... with <this renter>"; a bare substring test
+        # would match renter names hiding inside street names.
+        if ev and target and re.search(rf"with\s+{re.escape(target)}\b",
+                                       str(ev.get("summary", "")),
+                                       re.IGNORECASE):
             cancel_event(event_id)
+            _delete_showing_quiet(event_id)
             return "canceled"
         return "kept-unparsed"
     if target not in [n.lower() for n in names]:
         return "kept-unparsed"  # someone else's event - never delete it
     remaining = [n for n in names if n.lower() != target]
     if not remaining:
-        cancel_event(event_id)
+        if ev:
+            cancel_event(event_id)
+        else:
+            try:  # ledger knows the showing but the event is already gone
+                cancel_event(event_id)
+            except Exception as e:  # noqa: BLE001
+                log.error("cancel of unseen event %s: %s", event_id, e)
+        _delete_showing_quiet(event_id)
         return "canceled"
-    composio_execute("GOOGLECALENDAR_UPDATE_EVENT", {
-        "calendarId": "primary",
-        "event_id": event_id,
-        "description": _rebuild_description(desc, remaining),
-        "send_updates": True,
-    })
+    try:
+        ledger.upsert_showing(event_id, renters=remaining)
+    except Exception as e:  # noqa: BLE001
+        log.error("showing ledger update failed for %s: %s", event_id, e)
+    if ev:
+        composio_execute("GOOGLECALENDAR_UPDATE_EVENT", {
+            "calendarId": "primary",
+            "event_id": event_id,
+            "description": _rebuild_description(desc, remaining),
+            "send_updates": True,
+        })
     return "removed"
+
+
+def _delete_showing_quiet(event_id: str):
+    try:
+        ledger.delete_showing(event_id)
+    except Exception as e:  # noqa: BLE001
+        log.error("showing ledger delete failed for %s: %s", event_id, e)

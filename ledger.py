@@ -267,6 +267,36 @@ def write_shadow(thread_id: str, stage_key: str, payload: dict):
 
 # ---------------------------------------------------------------- config + facts
 
+# ---------------------------------------------------------------- showings
+# The ledger owns WHO IS ON EACH SHOWING (2026-08-25, calendar-as-projection
+# refactor phase A). Calendar event descriptions are rendered FROM these docs
+# and never parsed back as a database; calendar_logic.parse_inquirers survives
+# only as the migration fallback for events created before this collection.
+
+def upsert_showing(event_id: str, address: str = None, start_iso: str = None,
+                   agent_name: str = None, renters: list = None) -> None:
+    fields = {"updated_at": _now()}
+    if address is not None:
+        fields["address"] = address
+    if start_iso is not None:
+        fields["start_iso"] = start_iso
+    if agent_name is not None:
+        fields["agent_name"] = agent_name
+    if renters is not None:
+        fields["renters"] = renters
+    init_db().collection("zillow_showings").document(event_id).set(
+        fields, merge=True)
+
+
+def get_showing(event_id: str) -> dict | None:
+    snap = init_db().collection("zillow_showings").document(event_id).get()
+    return snap.to_dict() if snap.exists else None
+
+
+def delete_showing(event_id: str) -> None:
+    init_db().collection("zillow_showings").document(event_id).delete()
+
+
 def blocked_addresses() -> list:
     """Leased/off-market list from zillow_config/properties. Falls back to []
     on any error (never blocks the instant reply)."""
