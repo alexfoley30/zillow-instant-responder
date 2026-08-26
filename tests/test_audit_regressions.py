@@ -247,7 +247,57 @@ def test_affirmative_closer_is_a_yes_not_noise():
         assert not responder._AFFIRM_RE.search(text), text
 
 
-# ------------------------------------------------- 5. weekday snap ambiguity
+# ------------------------------------------------- 5. Alec 8/25: consolidate once
+
+CHELSEA_EVENT = {
+    "id": "evC",
+    "summary": "Showing — 2118 S El Marino with Chelsea",
+    "location": "2118 S El Marino, Mesa, AZ, 85202",
+    "description": ("Zillow inquiry.\nInquirers: Chelsea.\n"
+                    "Agent: Rhett Lueck (rhettlueck@gmail.com)."),
+    "start": {"dateTime": "2026-08-26T15:15:00-07:00"},
+    "end": {"dateTime": "2026-08-26T15:45:00-07:00"},
+}
+
+
+def test_same_house_fold_offered_first_time():
+    now = datetime(2026, 8, 25, 18, 0, tzinfo=AZ)  # Tue evening
+    v = cal.validate_slot(datetime(2026, 8, 26, 18, 0, tzinfo=AZ),
+                          "2118 S El Marino, Mesa, AZ, 85202",
+                          [CHELSEA_EVENT], now_az=now)
+    assert not v["ok"] and v["reason"] == "same-house-slot-exists"
+    assert v["fold"]["event"]["id"] == "evC"
+
+
+def test_same_house_bypassed_after_renter_declined_the_offer():
+    # Alec 2026-08-25: he was offered 3:15 and answered "6pm" three times;
+    # the fold rule re-offered 3:15 every time. With ignore_same_house the
+    # renter's valid counter-time books instead.
+    now = datetime(2026, 8, 25, 18, 0, tzinfo=AZ)
+    v = cal.validate_slot(datetime(2026, 8, 26, 18, 0, tzinfo=AZ),
+                          "2118 S El Marino, Mesa, AZ, 85202",
+                          [CHELSEA_EVENT], now_az=now,
+                          ignore_same_house=True)
+    assert v["ok"], v
+    assert v.get("fold") is None
+
+
+def test_newer_renter_message_blocks_booking(monkeypatch):
+    relay = "x@convo.zillow.com"
+    msgs = [
+        {"messageId": "m1", "sender": relay},
+        {"messageId": "a1", "sender": "alex@azfoleyhomes.com"},
+        {"messageId": "m2", "sender": relay},  # the unread correction
+    ]
+    monkeypatch.setattr(responder.gm, "fetch_thread", lambda tid: msgs)
+    assert responder._newer_renter_message_exists("t", "m1") is True
+    assert responder._newer_renter_message_exists("t", "m2") is False
+    monkeypatch.setattr(responder.gm, "fetch_thread",
+                        lambda tid: (_ for _ in ()).throw(RuntimeError("net")))
+    assert responder._newer_renter_message_exists("t", "m1") is False  # fail open
+
+
+# ------------------------------------------------- 6. weekday snap ambiguity
 
 def test_snap_skips_multi_weekday_raw():
     now = datetime(2026, 8, 20, 18, 0, tzinfo=AZ)  # Thursday

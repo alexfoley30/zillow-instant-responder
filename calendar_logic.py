@@ -130,7 +130,8 @@ def find_existing_showing(address: str, events: list = None,
 
 
 def validate_slot(start_az: datetime, address: str, events: list,
-                  bounds: dict = None, now_az: datetime = None) -> dict:
+                  bounds: dict = None, now_az: datetime = None,
+                  ignore_same_house: bool = False) -> dict:
     """Deterministic validation of one candidate slot.
     Returns {"ok": True, "agent": {...}, "same_day": bool} or
     {"ok": False, "reason": str, "fold": {...}|None}.
@@ -168,10 +169,17 @@ def validate_slot(start_az: datetime, address: str, events: list,
     if status == "blocked":
         return {"ok": False, "reason": "away-blocked", "fold": None}
 
-    # Existing showing at the same house always wins -> fold, never double-book.
-    existing = find_existing_showing(address, events=day_events, min_lead_hours=0)
-    if existing and abs((existing["start_az"] - start_az).total_seconds()) < 3600 * 6:
-        return {"ok": False, "reason": "same-house-slot-exists", "fold": existing}
+    # Existing showing at the same house wins ONCE -> offer the fold instead
+    # of double-booking. The caller passes ignore_same_house=True after the
+    # renter has already been offered that slot and countered with their own
+    # time (Alec 2026-08-25: three identical "come at 3:15" replies to a
+    # renter who said 6pm every time, then a fold into the 3:15 he refused).
+    if not ignore_same_house:
+        existing = find_existing_showing(address, events=day_events,
+                                         min_lead_hours=0)
+        if existing and abs((existing["start_az"] - start_az).total_seconds()) < 3600 * 6:
+            return {"ok": False, "reason": "same-house-slot-exists",
+                    "fold": existing}
 
     same_day = rules.is_same_day(start_az, now_az)
     agent = rules.pick_agent(start_az, now_az)

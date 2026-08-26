@@ -76,6 +76,29 @@ _CLOSER_RE = re.compile(
 _AFFIRM_RE = re.compile(
     r"(sounds? good|perfect|great|awesome|will do|works)", re.IGNORECASE)
 
+# Templates that put a live, acceptable offer in front of the renter.
+OFFER_TEMPLATES = ("offer_existing", "offer_existing_p2",
+                   "offer_existing_reply", "propose_times", "counter")
+
+
+def _newer_renter_message_exists(thread_id: str, message_id: str) -> bool:
+    """True when a renter message NEWER than the trigger sits on the thread.
+    Booking off a stale trigger while the correction sat unread put Alec
+    into the exact slot he had refused 30 seconds earlier (2026-08-25:
+    'Tomorrow preferably' booked 3:15 while 'I cannot do 3:15pm' was next
+    to it). Bookings check this; plain replies do not (Melissa 8/23: the
+    trigger message, not the newest, is what gets classified)."""
+    try:
+        msgs = gm.fetch_thread(thread_id)
+    except Exception as e:  # noqa: BLE001 - can't verify: proceed as before
+        log.error("newest-check fetch failed %s: %s", thread_id, e)
+        return False
+    newest = None
+    for m in msgs:
+        if gm.is_from_relay(m):
+            newest = gm.msg_id(m)
+    return bool(newest) and newest != message_id
+
 
 def _offer_is_live(doc, now_az) -> bool:
     """A standing offer the renter could be saying yes to."""
@@ -88,9 +111,7 @@ def _offer_is_live(doc, now_az) -> bool:
             return True
     except (ValueError, TypeError):
         pass
-    return doc.get("last_reply_template") in (
-        "offer_existing", "offer_existing_p2", "offer_existing_reply",
-        "propose_times", "counter")
+    return doc.get("last_reply_template") in OFFER_TEMPLATES
 
 SUBJECT_RE = re.compile(
     r"^(?:Re:\s*)?(?P<name>[A-Za-z][\w'’.-]*)\s+is\s+requesting\s+"
@@ -449,6 +470,10 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
         except Exception as e:  # noqa: BLE001
             log.error("vague-time consolidate lookup failed for %s: %s",
                       thread_id, e)
+        if (doc or {}).get("last_reply_template") in OFFER_TEMPLATES:
+            slots = []  # consolidate ONCE: they already saw an offer -
+            # falling through gives concrete alternatives instead of the
+            # same slot again (Alec 2026-08-25).
         if slots:
             when_h = slots[0]["when_human"]
             if len(slots) > 1:
@@ -526,6 +551,11 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
     Books against the EVENT THAT WAS OFFERED when the thread recorded one -
     the soonest showing is only the fallback (audit 8/25: a showing created
     between offer and yes could hijack the fold onto the wrong time)."""
+    if _newer_renter_message_exists(thread_id, message_id):
+        needs_human(thread_id, first_name, address,
+                    "renter sent another message while their yes was being "
+                    "processed - book by hand", urgent=True)
+        return "no-send:superseded-by-newer-message"
     existing = None
     try:
         shows = cal.find_existing_showings(address)
@@ -617,18 +647,39 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
             continue
         if start_az < now_az:
             continue
+        # CONSOLIDATE ONCE (Alec 2026-08-25: three identical "come at 3:15"
+        # replies to a renter who asked for 6pm every time). The existing
+        # slot gets offered a single time; once the renter answers an offer
+        # with their own valid time, that time books - a second trip beats
+        # a lost lead.
+        already_offered = (doc or {}).get("last_reply_template") in OFFER_TEMPLATES
         v = cal.validate_slot(start_az, address, events,
                               bounds={"after": cand.get("after"),
                                       "before": cand.get("before")},
-                              now_az=now_az)
+                              now_az=now_az,
+                              ignore_same_house=already_offered)
         if v.get("fold"):
             existing = v["fold"]
-            return send_stage(
+            result = send_stage(
                 thread_id, f"reply__{message_id}", relay,
                 T.offer_existing(first_name, address, existing["when_human"]),
                 [AWAITING_LABEL], [], {"template": "offer_existing_p2"}, message_id)
+            if result == "sent":
+                # Arm the offer properly so a yes folds into THIS event
+                # (before 8/25 the p2 offer never recorded what it offered).
+                ledger.transition(
+                    thread_id, ledger.OFFERED,
+                    offered_start_iso=existing["start_az"].isoformat(),
+                    offered_event_id=existing["event"].get("id", ""))
+            return result
         if not v.get("ok"):
             continue
+
+        if _newer_renter_message_exists(thread_id, message_id):
+            needs_human(thread_id, first_name, address,
+                        "renter sent another message while this one was "
+                        "being processed - book by hand", urgent=True)
+            return "no-send:superseded-by-newer-message"
 
         agent, same_day = v["agent"], v["same_day"]
         jace_cover = v.get("jace_cover")
