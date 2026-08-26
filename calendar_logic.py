@@ -158,7 +158,8 @@ def validate_slot(start_az: datetime, address: str, events: list,
                   bounds: dict = None, now_az: datetime = None,
                   ignore_same_house: bool = False,
                   declined_iso: list = None, earliest_daily: str = None,
-                  latest_daily: str = None) -> dict:
+                  latest_daily: str = None,
+                  enforce_daily_bounds: bool = True) -> dict:
     """Deterministic validation of one candidate slot.
     Returns {"ok": True, "agent": {...}, "same_day": bool} or
     {"ok": False, "reason": str, "fold": {...}|None}.
@@ -176,8 +177,15 @@ def validate_slot(start_az: datetime, address: str, events: list,
         return {"ok": False, "reason": "too-soon", "fold": None}
     if not rules.respects_renter_bounds(start_az, bounds.get("after"), bounds.get("before")):
         return {"ok": False, "reason": "violates-renter-bounds", "fold": None}
-    if not slot_acceptable_to_renter(start_az, declined_iso,
-                                     earliest_daily, latest_daily):
+    # Daily bounds steer times WE pick (counters, fold offers). A renter
+    # EXPLICITLY proposing a time can obviously make that time, so the book
+    # path passes enforce_daily_bounds=False - otherwise Alec's stored
+    # "after 6pm weekdays" would veto his own "Saturday 11am works".
+    # Declined slots stay vetoed everywhere.
+    if not slot_acceptable_to_renter(
+            start_az, declined_iso,
+            earliest_daily if enforce_daily_bounds else None,
+            latest_daily if enforce_daily_bounds else None):
         return {"ok": False, "reason": "renter-cannot-make-it", "fold": None}
 
     # NOTE: the old datetime.min fallback here raised OverflowError the moment

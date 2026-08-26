@@ -744,7 +744,8 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                               ignore_same_house=already_offered,
                               declined_iso=facts["declined_iso"],
                               earliest_daily=facts["earliest_daily"],
-                              latest_daily=facts["latest_daily"])
+                              latest_daily=facts["latest_daily"],
+                              enforce_daily_bounds=False)
         if v.get("fold"):
             existing = v["fold"]
             result = send_stage(

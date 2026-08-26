@@ -332,6 +332,23 @@ def test_fold_never_offers_slot_renter_cannot_make():
     assert v.get("fold") is None
 
 
+def test_explicit_proposal_overrides_daily_bound_but_not_declines():
+    # A renter naming an exact time can obviously make that time: the book
+    # path disables the daily bound (else Alec's "after 6pm weekdays" would
+    # veto his own "Saturday 11am works"). Declined slots stay vetoed.
+    now = datetime(2026, 8, 25, 9, 0, tzinfo=AZ)
+    v = cal.validate_slot(datetime(2026, 8, 26, 11, 0, tzinfo=AZ),
+                          "2118 S El Marino, Mesa, AZ, 85202", [],
+                          now_az=now, earliest_daily="18:00",
+                          enforce_daily_bounds=False)
+    assert v["ok"], v
+    v2 = cal.validate_slot(datetime(2026, 8, 26, 11, 0, tzinfo=AZ),
+                           "2118 S El Marino, Mesa, AZ, 85202", [],
+                           now_az=now, declined_iso=["2026-08-26T11:00"],
+                           enforce_daily_bounds=False)
+    assert not v2["ok"] and v2["reason"] == "renter-cannot-make-it"
+
+
 def test_counter_slots_respect_daily_bound():
     # Alec 8/24: countered 1:00/1:30 PM to an after-6pm renter. Counters
     # must skip anything before earliest_daily.
