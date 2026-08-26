@@ -132,6 +132,55 @@ def parse_subject(subject: str):
 
 # ---------------------------------------------------------------- send core
 
+def _renter_facts(doc: dict, cls: dict = None) -> dict:
+    """Cumulative renter scheduling facts for the deterministic validators.
+    The freshest full-thread extraction wins; the thread doc carries them
+    between messages (2026-08-25, whole-thread reading)."""
+    doc, cls = doc or {}, cls or {}
+    declined = [f"{d['date']}T{d['time']}"
+                for d in cls.get("declined_times") or []
+                if d.get("date") and d.get("time")]
+    if not declined:
+        declined = list(doc.get("declined_slots_iso") or [])
+    return {
+        "declined_iso": declined,
+        "earliest_daily": cls.get("earliest_daily") or doc.get("earliest_daily"),
+        "latest_daily": cls.get("latest_daily") or doc.get("latest_daily"),
+    }
+
+
+def review_gate(thread_id: str, body: str, template: str,
+                msgs: list = None) -> tuple:
+    """Second look before any renter-facing send (2026-08-25): re-read the
+    whole conversation and block a reply that contradicts the renter,
+    repeats an earlier send, or answers the wrong thing. FAILS OPEN - the
+    deterministic guards still stand when the review can't run. Returns
+    (ok, reason)."""
+    if template == "approved_answer":
+        return True, ""  # Alex's own words are never second-guessed
+    try:
+        msgs = msgs or gm.fetch_thread(thread_id)
+        transcript = gm.thread_transcript(msgs)
+    except Exception as e:  # noqa: BLE001
+        log.error("review_gate fetch failed %s (sending anyway): %s",
+                  thread_id, e)
+        return True, ""
+    r = llm.review_reply(transcript, body, template)
+    if r.get("verdict") == "block":
+        reason = r.get("reason") or "review blocked"
+        log.warning("REVIEW BLOCKED %s (%s): %s", thread_id, template, reason)
+        return False, reason
+    return True, ""
+
+
+def _escalate_review_block(thread_id: str, reason: str, template: str):
+    doc = ledger.get_thread(thread_id) or {}
+    needs_human(thread_id, doc.get("renter_name") or "the renter",
+                doc.get("property_address") or "the property",
+                f"outgoing {template} blocked by pre-send review: {reason}",
+                urgent=True)
+
+
 def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
                labels_add: list, labels_remove: list, meta: dict,
                trigger_message_id: str = "") -> str:
@@ -165,6 +214,12 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
             return "skipped:recovered-already-sent"
         if not ledger.takeover_send(thread_id, stage_key):
             return "skipped:takeover-lost"
+
+    ok, why = review_gate(thread_id, body, meta.get("template", stage_key))
+    if not ok:
+        ledger.mark_failed(thread_id, stage_key, f"review-blocked: {why}")
+        _escalate_review_block(thread_id, why, meta.get("template", stage_key))
+        return "no-send:review-blocked"
 
     try:
         gm.send_reply(thread_id, relay, body)
@@ -348,8 +403,25 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
     last_alex = next((gm.msg_body(m) for m in reversed(msgs) if gm.is_from_alex(m)), "")
     now_az = datetime.now(AZ_TZ)
     cls = rules.snap_weekday_dates(
-        llm.classify_reply(renter_text, last_alex, now_az), now_az)
+        llm.classify_reply(renter_text, last_alex, now_az,
+                           transcript=gm.thread_transcript(msgs)), now_az)
     ledger.record_message_outcome(message_id, "classified", cls)
+    if not cls.get("_fallback"):
+        # Persist the whole-thread renter facts; each LLM pass re-derives
+        # them from the full conversation, so replace, don't merge. The
+        # regex fallback extracts none and must not wipe stored ones.
+        try:
+            ledger.upsert_thread(
+                thread_id,
+                constraints=cls.get("constraints") or [],
+                earliest_daily=cls.get("earliest_daily"),
+                latest_daily=cls.get("latest_daily"),
+                declined_slots_iso=[
+                    f"{d['date']}T{d['time']}"
+                    for d in cls.get("declined_times") or []
+                    if d.get("date") and d.get("time")])
+        except Exception as e:  # noqa: BLE001 - bookkeeping, never blocks
+            log.error("renter-facts persist failed %s: %s", thread_id, e)
     intent = cls["intent"]
     # Deterministic closer handling (Alec 2026-08-23 + audit 2026-08-25).
     # No live offer: courtesy text can close a loop but never book, cancel,
@@ -509,7 +581,12 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
                 events = []
             cand = []
             try:
-                cand = cal.counter_slots(address, events, now_az=now_az) if address else []
+                vf = _renter_facts(doc, cls)
+                cand = cal.counter_slots(
+                    address, events, now_az=now_az,
+                    declined_iso=vf["declined_iso"],
+                    earliest_daily=vf["earliest_daily"],
+                    latest_daily=vf["latest_daily"]) if address else []
             except Exception as e:  # noqa: BLE001
                 log.error("vague counter_slots failed: %s", e)
             if cand:
@@ -600,10 +677,16 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
         if not ledger.takeover_send(thread_id, stage):
             return "skipped:takeover-lost"
 
+    body = T.booking_confirmation(first_name, address,
+                                  existing["when_human"], agent_name)
+    ok, why = review_gate(thread_id, body, "booking_fold")
+    if not ok:
+        ledger.mark_failed(thread_id, stage, f"review-blocked: {why}")
+        _escalate_review_block(thread_id, why, "booking_fold")
+        return "no-send:review-blocked"
     try:
         cal.fold_renter_into_event(existing["event"], first_name)  # event FIRST
-        gm.send_reply(thread_id, relay, T.booking_confirmation(
-            first_name, address, existing["when_human"], agent_name))
+        gm.send_reply(thread_id, relay, body)
     except Exception as e:  # noqa: BLE001
         ledger.mark_failed(thread_id, stage, str(e))
         return "skipped:book-failed"
@@ -653,11 +736,15 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         # with their own valid time, that time books - a second trip beats
         # a lost lead.
         already_offered = (doc or {}).get("last_reply_template") in OFFER_TEMPLATES
+        facts = _renter_facts(doc, cls)
         v = cal.validate_slot(start_az, address, events,
                               bounds={"after": cand.get("after"),
                                       "before": cand.get("before")},
                               now_az=now_az,
-                              ignore_same_house=already_offered)
+                              ignore_same_house=already_offered,
+                              declined_iso=facts["declined_iso"],
+                              earliest_daily=facts["earliest_daily"],
+                              latest_daily=facts["latest_daily"])
         if v.get("fold"):
             existing = v["fold"]
             result = send_stage(
@@ -715,14 +802,20 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
             if not ledger.takeover_send(thread_id, stage_probe):
                 return "skipped:takeover-lost"
 
+        body = T.booking_confirmation(first_name, address, when_human,
+                                      agent["name"])
+        ok, why = review_gate(thread_id, body, "booking_new")
+        if not ok:
+            ledger.mark_failed(thread_id, stage_probe, f"review-blocked: {why}")
+            _escalate_review_block(thread_id, why, "booking_new")
+            return "no-send:review-blocked"
         try:
             event_id = cal.create_showing_event(address, first_name, start_az, agent)
         except Exception as e:  # noqa: BLE001
             ledger.mark_failed(thread_id, stage_probe, f"create_event: {e}")
             return "skipped:event-failed"
         try:
-            gm.send_reply(thread_id, relay, T.booking_confirmation(
-                first_name, address, when_human, agent["name"]))
+            gm.send_reply(thread_id, relay, body)
         except Exception as e:  # noqa: BLE001
             ledger.mark_failed(thread_id, stage_probe, f"send-after-event: {e} "
                                f"event_id={event_id}")
@@ -750,7 +843,11 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
 
     # No candidate survived validation -> counter with nearest valid slots.
     try:
-        slots = cal.counter_slots(address, events, now_az=now_az)
+        cf = _renter_facts(doc, cls)
+        slots = cal.counter_slots(address, events, now_az=now_az,
+                                  declined_iso=cf["declined_iso"],
+                                  earliest_daily=cf["earliest_daily"],
+                                  latest_daily=cf["latest_daily"])
     except Exception as e:  # noqa: BLE001
         log.error("counter_slots failed: %s", e)
         slots = []
@@ -827,7 +924,8 @@ def handle_alex_owned_reply(thread_id, doc, msgs, renter_text, message_id) -> st
         return "skipped:alex-owned"
     last_alex = next((gm.msg_body(m) for m in reversed(msgs) if gm.is_from_alex(m)), "")
     cls = rules.snap_weekday_dates(
-        llm.classify_reply(renter_text, last_alex, datetime.now(AZ_TZ)),
+        llm.classify_reply(renter_text, last_alex, datetime.now(AZ_TZ),
+                           transcript=gm.thread_transcript(msgs)),
         datetime.now(AZ_TZ))
     if cls["intent"] != "cancellation":
         return "skipped:alex-owned"

@@ -129,9 +129,36 @@ def find_existing_showing(address: str, events: list = None,
     return hits[0] if hits else None
 
 
+def slot_acceptable_to_renter(start_az: datetime, declined_iso: list = None,
+                              earliest_daily: str = None,
+                              latest_daily: str = None) -> bool:
+    """Whole-conversation renter facts (2026-08-25, 'give the rules ears'):
+    a slot the renter already declined, or one outside their stated daily
+    availability ('I get off around 6pm'), is never valid and never worth
+    offering - three identical 3:15 offers went to a renter whose every
+    message said 6pm because nothing consulted these facts."""
+    hm = start_az.strftime("%H:%M")
+    if earliest_daily and hm < earliest_daily:
+        return False
+    if latest_daily and hm > latest_daily:
+        return False
+    for iso in declined_iso or []:
+        try:
+            d = datetime.fromisoformat(iso)
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=AZ_TZ)
+            if abs((d - start_az).total_seconds()) <= 900:
+                return False
+        except (ValueError, TypeError):
+            continue
+    return True
+
+
 def validate_slot(start_az: datetime, address: str, events: list,
                   bounds: dict = None, now_az: datetime = None,
-                  ignore_same_house: bool = False) -> dict:
+                  ignore_same_house: bool = False,
+                  declined_iso: list = None, earliest_daily: str = None,
+                  latest_daily: str = None) -> dict:
     """Deterministic validation of one candidate slot.
     Returns {"ok": True, "agent": {...}, "same_day": bool} or
     {"ok": False, "reason": str, "fold": {...}|None}.
@@ -149,6 +176,9 @@ def validate_slot(start_az: datetime, address: str, events: list,
         return {"ok": False, "reason": "too-soon", "fold": None}
     if not rules.respects_renter_bounds(start_az, bounds.get("after"), bounds.get("before")):
         return {"ok": False, "reason": "violates-renter-bounds", "fold": None}
+    if not slot_acceptable_to_renter(start_az, declined_iso,
+                                     earliest_daily, latest_daily):
+        return {"ok": False, "reason": "renter-cannot-make-it", "fold": None}
 
     # NOTE: the old datetime.min fallback here raised OverflowError the moment
     # an all-day event (no start.dateTime) appeared in the window - year 1
@@ -177,7 +207,12 @@ def validate_slot(start_az: datetime, address: str, events: list,
     if not ignore_same_house:
         existing = find_existing_showing(address, events=day_events,
                                          min_lead_hours=0)
-        if existing and abs((existing["start_az"] - start_az).total_seconds()) < 3600 * 6:
+        if (existing
+                and abs((existing["start_az"] - start_az).total_seconds()) < 3600 * 6
+                and slot_acceptable_to_renter(existing["start_az"], declined_iso,
+                                              earliest_daily, latest_daily)):
+            # Never offer a slot the renter already declined or can't make -
+            # their own valid time wins in that case.
             return {"ok": False, "reason": "same-house-slot-exists",
                     "fold": existing}
 
@@ -214,12 +249,19 @@ def validate_slot(start_az: datetime, address: str, events: list,
 
 
 def counter_slots(address: str, events: list, now_az: datetime = None,
-                  count: int = 2) -> list:
-    """Earliest valid exact slots for Template 4 - same-day first by design."""
+                  count: int = 2, declined_iso: list = None,
+                  earliest_daily: str = None, latest_daily: str = None) -> list:
+    """Earliest valid exact slots for Template 4 - same-day first by design.
+    Renter facts flow through so counters never propose a time the renter
+    already said they can't make (Alec 8/24: countered 1:00/1:30 PM to a
+    renter whose messages all said after 6pm)."""
     now_az = now_az or datetime.now(AZ_TZ)
 
     def free(dt):
-        return validate_slot(dt, address, events, now_az=now_az).get("ok", False)
+        return validate_slot(dt, address, events, now_az=now_az,
+                             declined_iso=declined_iso,
+                             earliest_daily=earliest_daily,
+                             latest_daily=latest_daily).get("ok", False)
 
     return rules.next_valid_slots(now_az, count=count, is_free=free)
 

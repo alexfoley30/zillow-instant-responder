@@ -297,7 +297,109 @@ def test_newer_renter_message_blocks_booking(monkeypatch):
     assert responder._newer_renter_message_exists("t", "m1") is False  # fail open
 
 
-# ------------------------------------------------- 6. weekday snap ambiguity
+# ------------------------------------------------- 6. whole-thread ears (8/25)
+
+def test_slot_acceptable_to_renter():
+    slot = datetime(2026, 8, 26, 15, 15, tzinfo=AZ)
+    assert cal.slot_acceptable_to_renter(slot) is True
+    assert cal.slot_acceptable_to_renter(slot, earliest_daily="18:00") is False
+    assert cal.slot_acceptable_to_renter(
+        datetime(2026, 8, 26, 18, 0, tzinfo=AZ), earliest_daily="18:00") is True
+    assert cal.slot_acceptable_to_renter(slot, latest_daily="12:00") is False
+    assert cal.slot_acceptable_to_renter(
+        slot, declined_iso=["2026-08-26T15:15"]) is False
+    assert cal.slot_acceptable_to_renter(
+        slot, declined_iso=["2026-08-26T18:00"]) is True
+
+
+def test_validate_rejects_slot_renter_cannot_make():
+    now = datetime(2026, 8, 25, 18, 0, tzinfo=AZ)
+    v = cal.validate_slot(datetime(2026, 8, 26, 15, 15, tzinfo=AZ),
+                          "2118 S El Marino, Mesa, AZ, 85202", [],
+                          now_az=now, earliest_daily="18:00")
+    assert not v["ok"] and v["reason"] == "renter-cannot-make-it"
+
+
+def test_fold_never_offers_slot_renter_cannot_make():
+    # THE Alec ear: existing 3:15 showing, renter's whole thread says 6pm.
+    # The fold must not fire; his 6pm books on its own merits instead.
+    now = datetime(2026, 8, 25, 18, 0, tzinfo=AZ)
+    v = cal.validate_slot(datetime(2026, 8, 26, 18, 0, tzinfo=AZ),
+                          "2118 S El Marino, Mesa, AZ, 85202",
+                          [CHELSEA_EVENT], now_az=now,
+                          earliest_daily="18:00")
+    assert v["ok"], v
+    assert v.get("fold") is None
+
+
+def test_counter_slots_respect_daily_bound():
+    # Alec 8/24: countered 1:00/1:30 PM to an after-6pm renter. Counters
+    # must skip anything before earliest_daily.
+    now = datetime(2026, 8, 25, 9, 0, tzinfo=AZ)  # Tue morning
+    slots = cal.counter_slots("2118 S El Marino, Mesa, AZ, 85202", [],
+                              now_az=now, earliest_daily="18:00")
+    for s in slots:
+        assert s.strftime("%H:%M") >= "18:00", s
+        assert s.weekday() in (0, 2, 4), s  # only Mon/Wed/Fri windows reach 6pm
+
+
+def test_classify_fallback_carries_convo_fields():
+    import llm
+    out = llm.classify_reply("random text", "", datetime(2026, 8, 25, 9, 0))
+    for k in ("constraints", "earliest_daily", "latest_daily",
+              "declined_times", "cancel_reason"):
+        assert k in out, k
+
+
+def test_thread_transcript_labels_and_strips():
+    msgs = [
+        {"sender": "x@convo.zillow.com",
+         "messageText": "Alec says: I want a tour\nThanks for using Zillow"},
+        {"sender": "Alex Foley <alex@azfoleyhomes.com>",
+         "messageText": "Hi Alec, come at 3:15"},
+        {"sender": "noreply@something.com", "messageText": "spam"},
+    ]
+    t = gm.thread_transcript(msgs)
+    assert t.startswith("RENTER:")
+    assert "US: Hi Alec" in t
+    assert "spam" not in t
+
+
+def test_renter_facts_precedence():
+    doc = {"declined_slots_iso": ["2026-08-26T15:15"],
+           "earliest_daily": "18:00"}
+    fresh = {"declined_times": [{"date": "2026-08-27", "time": "10:00"}],
+             "earliest_daily": None, "latest_daily": "20:00"}
+    f = responder._renter_facts(doc, fresh)
+    assert f["declined_iso"] == ["2026-08-27T10:00"]  # fresh extraction wins
+    assert f["earliest_daily"] == "18:00"  # doc fills the gap
+    assert f["latest_daily"] == "20:00"
+    f2 = responder._renter_facts(doc, {})
+    assert f2["declined_iso"] == ["2026-08-26T15:15"]  # doc fallback
+
+
+def test_review_gate_blocks_and_fails_open(monkeypatch):
+    msgs = [{"sender": "x@convo.zillow.com", "messageText": "Renter says: hi"}]
+    monkeypatch.setattr(responder.gm, "fetch_thread", lambda tid: msgs)
+    monkeypatch.setattr(responder.llm, "review_reply",
+                        lambda t, b, tpl: {"verdict": "block",
+                                           "reason": "contradicts renter"})
+    ok, why = responder.review_gate("t1", "body", "windows_ask")
+    assert ok is False and "contradicts" in why
+    monkeypatch.setattr(responder.llm, "review_reply",
+                        lambda t, b, tpl: {"verdict": "send", "reason": ""})
+    assert responder.review_gate("t1", "body", "windows_ask")[0] is True
+    # Alex's approved words are never second-guessed
+    assert responder.review_gate("t1", "body", "approved_answer")[0] is True
+    # fetch failure fails open
+    monkeypatch.setattr(responder.gm, "fetch_thread",
+                        lambda tid: (_ for _ in ()).throw(RuntimeError("net")))
+    monkeypatch.setattr(responder.llm, "review_reply",
+                        lambda t, b, tpl: {"verdict": "block", "reason": "x"})
+    assert responder.review_gate("t1", "body", "windows_ask")[0] is True
+
+
+# ------------------------------------------------- 7. weekday snap ambiguity
 
 def test_snap_skips_multi_weekday_raw():
     now = datetime(2026, 8, 20, 18, 0, tzinfo=AZ)  # Thursday

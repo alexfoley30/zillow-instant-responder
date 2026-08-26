@@ -178,6 +178,29 @@ def last_renter_message(msgs: list) -> dict | None:
     return None
 
 
+def thread_transcript(msgs: list, per_msg_chars: int = 700,
+                      max_chars: int = 9000) -> str:
+    """The whole conversation as labeled plain-text lines, oldest first,
+    for whole-thread classification and the pre-send review gate
+    (2026-08-25). Renter messages go through extract_renter_text so Zillow
+    chrome never reaches the model; our messages are trimmed raw text."""
+    lines = []
+    for m in msgs or []:
+        if is_from_relay(m):
+            body = extract_renter_text(m) or msg_body(m)
+            role = "RENTER"
+        elif is_from_alex(m):
+            body = msg_body(m)
+            role = "US"
+        else:
+            continue
+        body = re.sub(r"\s+", " ", body or "").strip()
+        if body:
+            lines.append(f"{role}: {body[:per_msg_chars]}")
+    out = "\n".join(lines)
+    return out[-max_chars:] if len(out) > max_chars else out
+
+
 def alex_replied_after(msgs: list, message_id: str) -> bool:
     """True if an Alex outbound appears AFTER the message with message_id in
     thread order. If the id isn't found, falls back to 'is the very last
