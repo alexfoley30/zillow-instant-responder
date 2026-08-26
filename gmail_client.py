@@ -368,21 +368,38 @@ def modify_labels(thread_id: str, add: list, remove: list) -> dict:
     })
 
 
+# zillow/alerts-log (Label_30): archived audit copy of every pipeline alert.
+# Poke v2 delivery from Render was CONFIRMED live 2026-08-26 (Alex: "I got
+# poke texts and these emails"), so texts are the primary channel and the
+# email copies skip the inbox. If archiving fails the email stays loud in
+# the inbox - fail toward visible.
+ALERT_LOG_LABEL = os.environ.get("ALERT_LOG_LABEL_ID", "Label_30")
+
+
 def alert_email(subject: str, body: str) -> bool:
     """Poke-independent escalation channel (2026-08-23: Poke returned
     success while silently swallowing every pipeline ping - Alec's question
-    escalated into a void for hours). Plain email to Alex; his phone's Gmail
-    notification is the delivery guarantee."""
+    escalated into a void for hours). Since 2026-08-26 it is a quiet audit
+    trail: sent, labeled zillow/alerts-log, archived out of the inbox -
+    Poke texts are the loud channel."""
     try:
-        composio_execute("GMAIL_SEND_EMAIL", {
+        res = composio_execute("GMAIL_SEND_EMAIL", {
             "recipient_email": ALEX_EMAIL,
             "subject": subject,
             "body": body,
         })
-        return True
     except Exception as e:  # noqa: BLE001
         log.error("alert email failed: %s", e)
         return False
+    try:
+        data = res.get("data", res) if isinstance(res, dict) else {}
+        inner = data.get("response_data") or data
+        tid = (inner or {}).get("threadId") or (inner or {}).get("thread_id")
+        if tid:
+            modify_labels(tid, [ALERT_LOG_LABEL], ["INBOX"])
+    except Exception as e:  # noqa: BLE001 - archive is best-effort
+        log.error("alert email archive failed (left in inbox): %s", e)
+    return True
 
 
 POKE_V2_URL = "https://poke.com/api/v1/inbound/api-message"
