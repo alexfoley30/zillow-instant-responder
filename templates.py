@@ -70,7 +70,10 @@ def offer_existing(first_name, address, when_human, ack=False, answer=None):
 
 
 def booking_confirmation(first_name, address, when_human, agent_name):
-    """Template 3 - slot booked (new event or folded into an existing one)."""
+    """Template 3 - slot booked (new event or folded into an existing one).
+    TRIPWIRE: responder's legacy-thread reconstruction greps "You're all set"
+    from sent mail - if that phrase changes here, update route_message's
+    reconstruction block too."""
     meet = "I'll meet you there" if agent_name == "Alex Foley" \
         else f"{agent_name} will meet you there"
     return (
@@ -148,6 +151,8 @@ def windows_ask(first_name):
 
 
 def leased_reply(first_name, address):
+    # TRIPWIRE: reconstruction greps "has been rented"/"no longer available"
+    # from sent mail - changing this copy requires updating route_message.
     return (
         f"Hi {first_name},\n\n"
         f"Thanks for reaching out about {address}! I'm sorry to say that home has "

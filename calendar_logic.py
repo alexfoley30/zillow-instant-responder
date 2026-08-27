@@ -289,6 +289,55 @@ _POST_AGENT_NAMES_RE = re.compile(
 _AGENT_CLAUSE_RE = re.compile(r"Agent:\s*[^,\n(]+?\([^)]*\)", re.IGNORECASE)
 
 
+def _composio_ok(res: dict, context: str):
+    """Raise when a Composio execute reported failure. A silent 400 here is
+    how the phantom fold happened (2026-08-25 Alec: email sent, calendar
+    write quietly rejected); calendar mutations must fail LOUD so the book
+    paths treat them as failures."""
+    ok = isinstance(res, dict) and (
+        res.get("successful") is True
+        or (isinstance(res.get("data"), dict)
+            and res["data"].get("successful", True) is not False))
+    if not ok:
+        raise RuntimeError(f"composio {context} failed: {str(res)[:200]}")
+    return res
+
+
+def _full_update_fields(ev: dict, description: str) -> dict:
+    """Composio GOOGLECALENDAR_UPDATE_EVENT is a full REPLACE (live probe
+    2026-08-27): any field omitted is ERASED - a description-only update
+    stripped the probe event's title, attendees, and duration. Always send
+    the complete field set rebuilt from the event we just read. The tool
+    also REQUIRES start_datetime now; the old description-only calls were
+    400-ing silently."""
+    start_raw = str((ev.get("start") or {}).get("dateTime") or "")
+    end_raw = str((ev.get("end") or {}).get("dateTime") or "")
+    duration = rules.SHOWING_MINUTES
+    try:
+        s = datetime.fromisoformat(start_raw)
+        e = datetime.fromisoformat(end_raw)
+        duration = max(5, int((e - s).total_seconds() // 60))
+    except (ValueError, TypeError):
+        pass
+    fields = {
+        "calendarId": "primary",
+        "event_id": ev.get("id", ""),
+        "summary": ev.get("summary") or "Showing",
+        "description": description,
+        "start_datetime": start_raw[:19],
+        "event_duration_minutes": duration,
+        "timezone": "America/Phoenix",
+        "send_updates": "none",
+    }
+    attendees = [a.get("email") for a in ev.get("attendees") or []
+                 if a.get("email")]
+    if attendees:
+        fields["attendees"] = attendees
+    if ev.get("location"):
+        fields["location"] = ev["location"]
+    return fields
+
+
 def _split_names(blob: str) -> list:
     return [n.strip(" .\n") for n in blob.split(",") if n.strip(" .\n")]
 
@@ -335,7 +384,7 @@ def create_showing_event(address: str, first_name: str, start_az: datetime,
         "event_duration_minutes": rules.SHOWING_MINUTES,
         "timezone": "America/Phoenix",
         "attendees": sorted(attendees),
-        "send_updates": True,
+        "send_updates": "all",
     })
     data = res.get("data", res)
     ev = data.get("response_data") or data.get("event") or data
@@ -353,8 +402,17 @@ def create_showing_event(address: str, first_name: str, start_az: datetime,
 
 
 def agent_name_from_event(event: dict, default: str = "Alex Foley") -> str:
-    """Who actually meets the renter, read off the event itself - fold
+    """Who actually meets the renter. Ledger first (zillow_showings owns
+    agent_name since 8/25), description parse as the legacy fallback - fold
     confirmations used to hardcode Alex while the event said Rhett/Jace."""
+    event_id = (event or {}).get("id", "")
+    if event_id:
+        try:
+            doc = ledger.get_showing(event_id)
+            if doc and doc.get("agent_name"):
+                return doc["agent_name"]
+        except Exception as e:  # noqa: BLE001
+            log.error("showing agent lookup failed for %s: %s", event_id, e)
     m = re.search(r"Agent:\s*([^(\n]+?)\s*\(",
                   str((event or {}).get("description", "")))
     return m.group(1).strip() if m else default
@@ -385,12 +443,10 @@ def fold_renter_into_event(event: dict, first_name: str) -> str:
         return event_id  # already folded (idempotent)
     names.append(first_name.strip())
     ledger.upsert_showing(event_id, renters=names)
-    composio_execute("GOOGLECALENDAR_UPDATE_EVENT", {
-        "calendarId": "primary",
-        "event_id": event_id,
-        "description": _rebuild_description(desc, names),
-        "send_updates": True,
-    })
+    _composio_ok(composio_execute(
+        "GOOGLECALENDAR_UPDATE_EVENT",
+        _full_update_fields(event, _rebuild_description(desc, names))),
+        f"fold update {event_id}")
     return event_id
 
 
@@ -457,12 +513,10 @@ def remove_renter_or_cancel(event_id: str, first_name: str) -> str:
     except Exception as e:  # noqa: BLE001
         log.error("showing ledger update failed for %s: %s", event_id, e)
     if ev:
-        composio_execute("GOOGLECALENDAR_UPDATE_EVENT", {
-            "calendarId": "primary",
-            "event_id": event_id,
-            "description": _rebuild_description(desc, remaining),
-            "send_updates": True,
-        })
+        _composio_ok(composio_execute(
+            "GOOGLECALENDAR_UPDATE_EVENT",
+            _full_update_fields(ev, _rebuild_description(desc, remaining))),
+            f"remove update {event_id}")
     return "removed"
 
 

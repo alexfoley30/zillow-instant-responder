@@ -264,19 +264,32 @@ def needs_human(thread_id: str, first_name: str, address: str, last_line: str,
         ledger.write_shadow(thread_id, f"poke__{ledger.content_hash(msg)}",
                             {"would_poke": msg})
     else:
+        # Poke has returned success while delivering nothing (2026-08-23),
+        # so every escalation ALSO goes out as email. The rate-limit stamp
+        # is written ONLY when at least one channel succeeded (bug-echo
+        # 2026-08-27: stamping on double-failure suppressed the retry and
+        # the escalation vanished with only Render logs to show for it).
+        delivered = False
         try:
-            gm.poke_ping(msg)
+            delivered = bool(gm.poke_ping(msg))
         except Exception as e:  # noqa: BLE001
             log.error("poke ping failed: %s", e)
-        # Poke has returned success while delivering nothing (2026-08-23),
-        # so every escalation ALSO goes out as email - the channel Alex
-        # provably sees. Same 1/day/thread rate limit as the ping above.
-        gm.alert_email(
-            f"{tag}{first_name} - {address.split(',')[0]}",
-            msg + "\n\nSent by the Zillow pipeline (email backup channel; "
-                  "Poke delivery is unreliable). Reply to the renter via the "
-                  "thread in Gmail, or answer this Needs-you in chat.")
-        ledger.upsert_thread(thread_id, last_needs_human_ping_at=datetime.now(AZ_TZ))
+        try:
+            delivered = bool(gm.alert_email(
+                f"{tag}{first_name} - {address.split(',')[0]}",
+                msg + "\n\nSent by the Zillow pipeline (email backup channel; "
+                      "Poke delivery is unreliable). Reply to the renter via "
+                      "the thread in Gmail, or answer this Needs-you in "
+                      "chat.")) or delivered
+        except Exception as e:  # noqa: BLE001
+            log.error("alert email failed: %s", e)
+        if delivered:
+            ledger.upsert_thread(
+                thread_id, last_needs_human_ping_at=datetime.now(AZ_TZ))
+        else:
+            log.error("ESCALATION UNDELIVERED on BOTH channels for %s (%s) - "
+                      "ping stamp withheld so the next run retries", thread_id,
+                      first_name)
 
 
 # ---------------------------------------------------------------- new inquiry
@@ -878,6 +891,16 @@ def handle_cancellation(thread_id, doc, first_name, relay, message_id,
             "would_body": T.reschedule_after_cancel(first_name, reason_given),
         })
         return "shadowed"
+    if _newer_renter_message_exists(thread_id, message_id):
+        # bug-echo 2026-08-27: an "actually never mind" sitting unread must
+        # not lose the race to the cancel - clearing a showing is as
+        # irreversible as booking one.
+        needs_human(thread_id, first_name,
+                    address or doc.get("property_address") or "",
+                    "cancellation arrived but the renter sent another message "
+                    "right after - read both before touching the calendar",
+                    urgent=True)
+        return "no-send:superseded-by-newer-message"
     if event_id:
         try:
             # Fold-aware: shared consolidated events survive one renter's
@@ -894,12 +917,14 @@ def handle_cancellation(thread_id, doc, first_name, relay, message_id,
         except Exception as e:  # noqa: BLE001
             log.error("cancel/remove failed (continuing): %s", e)
     next_when = None
+    next_slot = None
     addr = address or doc.get("property_address") or ""
     if addr:
         try:
             for slot in cal.find_existing_showings(addr):
                 if slot["event"].get("id") != event_id:
                     next_when = slot["when_human"]
+                    next_slot = slot
                     break
         except Exception as e:  # noqa: BLE001
             log.error("post-cancel slot lookup failed: %s", e)
@@ -908,8 +933,19 @@ def handle_cancellation(thread_id, doc, first_name, relay, message_id,
                                                   next_when),
                         [AWAITING_LABEL], [HANDLED_LABEL],
                         {"template": "reschedule"}, message_id)
-    ledger.transition(thread_id, ledger.AWAITING_TIME, event_id=None,
-                      booked_start_iso=None)
+    # Arm (or clear) the offer state to match what the reply actually said
+    # (bug-echo 2026-08-27: the old transition left the CANCELED showing's
+    # offered_event_id in place - transition merges - so a later "yes"
+    # folded the renter back into the showing they had just canceled).
+    if next_slot is not None:
+        ledger.transition(thread_id, ledger.OFFERED, event_id=None,
+                          booked_start_iso=None,
+                          offered_start_iso=next_slot["start_az"].isoformat(),
+                          offered_event_id=next_slot["event"].get("id", ""))
+    else:
+        ledger.transition(thread_id, ledger.AWAITING_TIME, event_id=None,
+                          booked_start_iso=None, offered_start_iso=None,
+                          offered_event_id=None)
     return result
 
 
@@ -1024,6 +1060,10 @@ def route_message(thread_id: str, subject: str, sender: str, message_id: str) ->
         alex_bodies = [gm.msg_body(m).lower() for m in msgs if gm.is_from_alex(m)]
         if any("you're all set" in b for b in alex_bodies):
             state = ledger.BOOKED
+        # TRIPWIRE: the phrases grepped below are COUPLED to templates.py
+        # (booking_confirmation "You're all set", leased_reply "has been
+        # rented... no longer available"). Editing those template strings
+        # silently breaks this legacy-thread reconstruction - update both.
         elif any("has been rented" in b or "no longer available" in b
                  for b in alex_bodies):
             # The sweep already told this renter the home is rented - never
@@ -1120,6 +1160,29 @@ class Handler(BaseHTTPRequestHandler):
                                 manual = m_at > ping_at
                             if manual:
                                 self._send(200, "skipped:alex-replied-last")
+                                return
+                        # bug-echo 2026-08-27: Alex may be answering a ping
+                        # from HOURS ago; if the renter wrote again since the
+                        # ping, his approved answer may no longer fit - hold
+                        # it and re-ping instead of sending blind.
+                        ping_at = doc.get("last_needs_human_ping_at")
+                        if msgs_chk and ping_at is not None:
+                            newest_renter_at = None
+                            for m in msgs_chk:
+                                if gm.is_from_relay(m):
+                                    t = gm.msg_time(m)
+                                    if t is not None:
+                                        newest_renter_at = t
+                            if (newest_renter_at is not None
+                                    and newest_renter_at > ping_at):
+                                needs_human(
+                                    thread_id, first_name,
+                                    doc.get("property_address") or "",
+                                    "renter wrote AGAIN after the ping you "
+                                    "answered - re-read the thread, then "
+                                    "resend your answer (or a new one)",
+                                    urgent=True)
+                                self._send(200, "skipped:renter-wrote-again")
                                 return
                     except Exception as e:  # noqa: BLE001
                         log.error("send-approved freshness check failed "

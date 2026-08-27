@@ -249,22 +249,40 @@ def test_affirmative_closer_is_a_yes_not_noise():
 
 # ------------------------------------------------- 5. Alec 8/25: consolidate once
 
-CHELSEA_EVENT = {
-    "id": "evC",
-    "summary": "Showing — 2118 S El Marino with Chelsea",
-    "location": "2118 S El Marino, Mesa, AZ, 85202",
-    "description": ("Zillow inquiry.\nInquirers: Chelsea.\n"
-                    "Agent: Rhett Lueck (rhettlueck@gmail.com)."),
-    "start": {"dateTime": "2026-08-26T15:15:00-07:00"},
-    "end": {"dateTime": "2026-08-26T15:45:00-07:00"},
-}
+def _next_wed():
+    """Next Wednesday strictly in the future - these fixtures must never pin
+    a calendar date (the 8/26-pinned original expired overnight: the fold
+    lookup filters against the real clock)."""
+    d = datetime.now(AZ).date() + timedelta(days=1)
+    while d.weekday() != 2:
+        d += timedelta(days=1)
+    return d
+
+
+def _chelsea_event():
+    d = _next_wed()
+    return {
+        "id": "evC",
+        "summary": "Showing — 2118 S El Marino with Chelsea",
+        "location": "2118 S El Marino, Mesa, AZ, 85202",
+        "description": ("Zillow inquiry.\nInquirers: Chelsea.\n"
+                        "Agent: Rhett Lueck (rhettlueck@gmail.com)."),
+        "start": {"dateTime": f"{d}T15:15:00-07:00"},
+        "end": {"dateTime": f"{d}T15:45:00-07:00"},
+    }
+
+
+def _wed_ctx():
+    """(now_az, slot_1800) with now = the evening before the showing day."""
+    d = _next_wed()
+    now = datetime(d.year, d.month, d.day, 18, 0, tzinfo=AZ) - timedelta(days=1)
+    return now, datetime(d.year, d.month, d.day, 18, 0, tzinfo=AZ)
 
 
 def test_same_house_fold_offered_first_time():
-    now = datetime(2026, 8, 25, 18, 0, tzinfo=AZ)  # Tue evening
-    v = cal.validate_slot(datetime(2026, 8, 26, 18, 0, tzinfo=AZ),
-                          "2118 S El Marino, Mesa, AZ, 85202",
-                          [CHELSEA_EVENT], now_az=now)
+    now, slot = _wed_ctx()
+    v = cal.validate_slot(slot, "2118 S El Marino, Mesa, AZ, 85202",
+                          [_chelsea_event()], now_az=now)
     assert not v["ok"] and v["reason"] == "same-house-slot-exists"
     assert v["fold"]["event"]["id"] == "evC"
 
@@ -273,10 +291,9 @@ def test_same_house_bypassed_after_renter_declined_the_offer():
     # Alec 2026-08-25: he was offered 3:15 and answered "6pm" three times;
     # the fold rule re-offered 3:15 every time. With ignore_same_house the
     # renter's valid counter-time books instead.
-    now = datetime(2026, 8, 25, 18, 0, tzinfo=AZ)
-    v = cal.validate_slot(datetime(2026, 8, 26, 18, 0, tzinfo=AZ),
-                          "2118 S El Marino, Mesa, AZ, 85202",
-                          [CHELSEA_EVENT], now_az=now,
+    now, slot = _wed_ctx()
+    v = cal.validate_slot(slot, "2118 S El Marino, Mesa, AZ, 85202",
+                          [_chelsea_event()], now_az=now,
                           ignore_same_house=True)
     assert v["ok"], v
     assert v.get("fold") is None
@@ -313,8 +330,8 @@ def test_slot_acceptable_to_renter():
 
 
 def test_validate_rejects_slot_renter_cannot_make():
-    now = datetime(2026, 8, 25, 18, 0, tzinfo=AZ)
-    v = cal.validate_slot(datetime(2026, 8, 26, 15, 15, tzinfo=AZ),
+    now, slot = _wed_ctx()
+    v = cal.validate_slot(slot.replace(hour=15, minute=15),
                           "2118 S El Marino, Mesa, AZ, 85202", [],
                           now_az=now, earliest_daily="18:00")
     assert not v["ok"] and v["reason"] == "renter-cannot-make-it"
@@ -323,10 +340,9 @@ def test_validate_rejects_slot_renter_cannot_make():
 def test_fold_never_offers_slot_renter_cannot_make():
     # THE Alec ear: existing 3:15 showing, renter's whole thread says 6pm.
     # The fold must not fire; his 6pm books on its own merits instead.
-    now = datetime(2026, 8, 25, 18, 0, tzinfo=AZ)
-    v = cal.validate_slot(datetime(2026, 8, 26, 18, 0, tzinfo=AZ),
-                          "2118 S El Marino, Mesa, AZ, 85202",
-                          [CHELSEA_EVENT], now_az=now,
+    now, slot = _wed_ctx()
+    v = cal.validate_slot(slot, "2118 S El Marino, Mesa, AZ, 85202",
+                          [_chelsea_event()], now_az=now,
                           earliest_daily="18:00")
     assert v["ok"], v
     assert v.get("fold") is None
@@ -435,3 +451,123 @@ def test_snap_still_fixes_single_weekday_mismatch():
     out = rules.snap_weekday_dates(cls, now)
     assert out["time_candidates"][0]["date"] == "2026-08-21"  # the Friday
     assert out["time_candidates"][0]["weekday_snapped"] is True
+
+
+# ------------------------------------------------- 8. bug-echo 8/27 fixes
+
+def test_needs_human_stamp_only_when_a_channel_delivered(monkeypatch):
+    calls = {"upserts": []}
+    monkeypatch.setattr(responder, "dry_run", lambda: False)
+    monkeypatch.setattr(responder.ledger, "get_thread", lambda t: {})
+    monkeypatch.setattr(responder.ledger, "transition", lambda *a, **k: None)
+    monkeypatch.setattr(responder.ledger, "write_shadow", lambda *a, **k: None)
+    monkeypatch.setattr(responder.ledger, "content_hash", lambda s: "x")
+    monkeypatch.setattr(responder.ledger, "upsert_thread",
+                        lambda t, **kw: calls["upserts"].append(kw))
+    # both channels fail -> NO stamp (next run may retry)
+    monkeypatch.setattr(responder.gm, "poke_ping", lambda m: False)
+    monkeypatch.setattr(responder.gm, "alert_email", lambda s, b: False)
+    responder.needs_human("t1", "Renter", "1 Test St", "hello")
+    assert calls["upserts"] == []
+    # one channel succeeds -> stamped
+    monkeypatch.setattr(responder.gm, "alert_email", lambda s, b: True)
+    responder.needs_human("t1", "Renter", "1 Test St", "hello")
+    assert any("last_needs_human_ping_at" in kw for kw in calls["upserts"])
+
+
+def test_agent_name_prefers_showings_ledger(monkeypatch):
+    monkeypatch.setattr(cal.ledger, "get_showing",
+                        lambda eid: {"agent_name": "Rhett Lueck"})
+    ev = {"id": "e1", "description": "Agent: Jace Johnson (j@x.com)."}
+    assert cal.agent_name_from_event(ev) == "Rhett Lueck"
+    monkeypatch.setattr(cal.ledger, "get_showing", lambda eid: None)
+    assert cal.agent_name_from_event(ev) == "Jace Johnson"
+
+
+def _cancel_harness(monkeypatch, slots, newer=False):
+    state = {"transitions": [], "sends": [], "pings": []}
+    monkeypatch.setattr(responder, "dry_run", lambda: False)
+    monkeypatch.setattr(responder, "_newer_renter_message_exists",
+                        lambda t, m: newer)
+    monkeypatch.setattr(responder, "needs_human",
+                        lambda *a, **k: state["pings"].append(a))
+    monkeypatch.setattr(responder.cal, "remove_renter_or_cancel",
+                        lambda e, n: "removed")
+    monkeypatch.setattr(responder.cal, "find_existing_showings",
+                        lambda a: slots)
+    monkeypatch.setattr(responder, "send_stage",
+                        lambda *a, **k: state["sends"].append(a) or "sent")
+    monkeypatch.setattr(responder.ledger, "transition",
+                        lambda t, s, **kw: state["transitions"].append((s, kw)))
+    return state
+
+
+def test_cancel_arms_the_offered_next_slot(monkeypatch):
+    nxt = datetime(2026, 8, 28, 15, 0, tzinfo=AZ)
+    slots = [{"event": {"id": "evNEXT"}, "start_az": nxt,
+              "when_human": "Friday, August 28, at 3:00 PM"}]
+    st = _cancel_harness(monkeypatch, slots)
+    out = responder.handle_cancellation(
+        "t1", {"event_id": "evOLD", "renter_name": "Jamie"}, "Jamie",
+        "r@convo.zillow.com", "m1", cls={}, address="1 Test St")
+    assert out == "sent"
+    s, kw = st["transitions"][-1]
+    assert s == responder.ledger.OFFERED
+    assert kw["offered_event_id"] == "evNEXT"
+    assert kw["event_id"] is None
+
+
+def test_cancel_clears_stale_offer_when_no_next_slot(monkeypatch):
+    st = _cancel_harness(monkeypatch, [])
+    responder.handle_cancellation(
+        "t1", {"event_id": "evOLD", "renter_name": "Jamie"}, "Jamie",
+        "r@convo.zillow.com", "m1", cls={}, address="1 Test St")
+    s, kw = st["transitions"][-1]
+    assert s == responder.ledger.AWAITING_TIME
+    assert kw["offered_event_id"] is None and kw["offered_start_iso"] is None
+
+
+def test_cancel_defers_to_newer_renter_message(monkeypatch):
+    st = _cancel_harness(monkeypatch, [], newer=True)
+    out = responder.handle_cancellation(
+        "t1", {"event_id": "evOLD", "renter_name": "Jamie"}, "Jamie",
+        "r@convo.zillow.com", "m1", cls={}, address="1 Test St")
+    assert out == "no-send:superseded-by-newer-message"
+    assert st["pings"], "must escalate urgently"
+    assert not st["sends"] and not st["transitions"]
+
+
+def test_calendar_updates_send_full_field_set(monkeypatch):
+    # Live probe 2026-08-27: Composio UPDATE_EVENT is a full REPLACE and
+    # requires start_datetime - a description-only update erased the probe
+    # event's title, attendees, and duration. Every update must rebuild the
+    # complete field set from the event it just read.
+    ev = {"id": "ev1", "summary": "Jace Showing: 2118 S El Marino",
+          "location": "2118 S El Marino, Mesa, AZ, 85202",
+          "description": PROD_FOLDED,
+          "start": {"dateTime": "2030-01-09T15:15:00-07:00"},
+          "end": {"dateTime": "2030-01-09T15:45:00-07:00"},
+          "attendees": [{"email": "alex@azfoleyhomes.com"},
+                        {"email": "jacejohnson.re@gmail.com"}]}
+    stub = _CalendarStub(monkeypatch, ev)
+    assert cal.remove_renter_or_cancel("ev1", "Jessica") == "removed"
+    upd = next(p for s, p in stub.calls if s == "GOOGLECALENDAR_UPDATE_EVENT")
+    assert upd["summary"] == "Jace Showing: 2118 S El Marino"
+    assert upd["start_datetime"] == "2030-01-09T15:15:00"
+    assert upd["event_duration_minutes"] == 30
+    assert upd["attendees"] == ["alex@azfoleyhomes.com",
+                                "jacejohnson.re@gmail.com"]
+    assert upd["send_updates"] == "none"
+
+
+def test_composio_failure_raises_loud(monkeypatch):
+    ev = {"id": "ev1", "summary": "x", "description": PROD_SOLO,
+          "start": {"dateTime": "2030-01-09T15:15:00-07:00"},
+          "end": {"dateTime": "2030-01-09T15:45:00-07:00"}}
+    stub = _CalendarStub(monkeypatch, ev)
+    monkeypatch.setattr(cal, "composio_execute",
+                        lambda slug, p: {"successful": False,
+                                         "error": "400 whatever"})
+    import pytest
+    with pytest.raises(RuntimeError):
+        cal.fold_renter_into_event(ev, "Sezer")
