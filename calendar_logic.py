@@ -320,7 +320,7 @@ def _full_update_fields(ev: dict, description: str) -> dict:
     except (ValueError, TypeError):
         pass
     fields = {
-        "calendarId": "primary",
+        "calendar_id": "primary",
         "event_id": ev.get("id", ""),
         "summary": ev.get("summary") or "Showing",
         "description": description,
@@ -375,7 +375,7 @@ def create_showing_event(address: str, first_name: str, start_az: datetime,
     end_az = start_az + timedelta(minutes=rules.SHOWING_MINUTES)
     attendees = {rules.ALEX["email"], agent["email"], rules.BRIANNA_VIEWER}
     res = composio_execute("GOOGLECALENDAR_CREATE_EVENT", {
-        "calendarId": "primary",
+        "calendar_id": "primary",
         "summary": f"Showing — {address.split(',')[0].strip()} with {first_name}",
         "location": address,
         "description": (f"Zillow inquiry.\nInquirers: {first_name}.\n"
@@ -452,7 +452,7 @@ def fold_renter_into_event(event: dict, first_name: str) -> str:
 
 def cancel_event(event_id: str):
     composio_execute("GOOGLECALENDAR_DELETE_EVENT", {
-        "calendarId": "primary",
+        "calendar_id": "primary",
         "event_id": event_id,
     })
 

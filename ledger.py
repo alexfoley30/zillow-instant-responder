@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 import firebase_admin
 from firebase_admin import credentials, firestore
 from google.api_core.exceptions import AlreadyExists, FailedPrecondition
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 log = logging.getLogger("zillow-instant.ledger")
 
@@ -120,7 +121,38 @@ def claim_content_hash(thread_id: str, text: str) -> bool:
             # ("yes" twice a week apart). Refresh the window and treat as new.
             ref.set({"created_at": firestore.SERVER_TIMESTAMP})
             return True
+        if _thread_send_failed_since(thread_id, created):
+            # The claim exists because WE processed this text - and then the
+            # send/booking failed after the claim (mikayla + Jessica, 8/29:
+            # /reprocess returned dup-content forever, renter stranded).
+            # A failure newer than the claim means the renter never got the
+            # reply the claim was protecting against duplicating, so a re-run
+            # is a retry, not a dupe. Refresh and let it through.
+            ref.set({"created_at": firestore.SERVER_TIMESTAMP})
+            return True
         return False
+
+
+def _thread_send_failed_since(thread_id: str, claimed_at) -> bool:
+    """True when this thread has a message whose processing FAILED at or after
+    the moment the content hash was claimed - the strand signature."""
+    failed_prefixes = ("skipped:event-failed", "error:", "no-send:calendar-error",
+                       "no-send:send-failed")
+    try:
+        db = init_db()
+        q = db.collection("zillow_messages").where(
+            filter=FieldFilter("thread_id", "==", thread_id)).stream()
+        for m in q:
+            d = m.to_dict() or {}
+            outcome = str(d.get("outcome") or "")
+            if not outcome.startswith(failed_prefixes):
+                continue
+            processed = d.get("processed_at")
+            if claimed_at is None or processed is None or processed >= claimed_at:
+                return True
+    except Exception as e:  # noqa: BLE001
+        log.error("failed-send exemption check errored (treating as dup): %s", e)
+    return False
 
 
 # ---------------------------------------------------------------- threads
