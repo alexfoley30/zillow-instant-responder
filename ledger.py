@@ -135,7 +135,13 @@ def claim_content_hash(thread_id: str, text: str) -> bool:
 
 def _thread_send_failed_since(thread_id: str, claimed_at) -> bool:
     """True when this thread has a message whose processing FAILED at or after
-    the moment the content hash was claimed - the strand signature."""
+    the moment the content hash was claimed - the strand signature.
+
+    The 10-minute grace matters: claim_message stamps processed_at a beat
+    BEFORE claim_content_hash stamps created_at in the same request, so the
+    very message whose failure stranded the hash always looks slightly older
+    than the claim. Without the grace the exemption can never fire for the
+    primary case (verified live on Mitchell's thread, 2026-08-29)."""
     failed_prefixes = ("skipped:event-failed", "error:", "no-send:calendar-error",
                        "no-send:send-failed")
     try:
@@ -148,7 +154,8 @@ def _thread_send_failed_since(thread_id: str, claimed_at) -> bool:
             if not outcome.startswith(failed_prefixes):
                 continue
             processed = d.get("processed_at")
-            if claimed_at is None or processed is None or processed >= claimed_at:
+            if (claimed_at is None or processed is None
+                    or processed >= claimed_at - timedelta(minutes=10)):
                 return True
     except Exception as e:  # noqa: BLE001
         log.error("failed-send exemption check errored (treating as dup): %s", e)
