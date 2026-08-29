@@ -201,7 +201,7 @@ REVIEW_PROMPT = """You are the final proofreading gate for an automated rental-s
 
 Block the reply ONLY if it clearly does one of these:
 1. Contradicts something the renter said (offers or confirms a time they said they cannot do, ignores a stated constraint like "only after 6pm", says "see you then" for a slot they declined).
-2. Repeats a previous outgoing message nearly verbatim (the renter already received this exact ask or offer).
+2. Repeats a previous outgoing message nearly verbatim (the renter already received this exact ask or offer). EXCEPTION: a showing_reminder template is a scheduled reminder about an already-confirmed tour - restating the time, address and who is meeting them is its whole job, so never block it merely for overlapping the booking confirmation. Block a reminder only if the tour it names was cancelled or the renter already said they cannot make it.
 3. Addresses the wrong person or wrong property, or answers a completely different question than the renter asked.
 
 Anything else sends. Imperfect but harmless replies send. When unsure, send. reason: one short sentence (used in an alert to the property manager when blocked).

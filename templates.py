@@ -284,3 +284,42 @@ def fact_answer(first_name, answer_line):
         f"{answer_line}\n\n"
         f"{SIGNATURE}"
     )
+
+
+def _meet_line(agent_name):
+    return "I'll meet you there" if agent_name == "Alex Foley" \
+        else f"{agent_name} will meet you there"
+
+
+def showing_reminder_day_before(first_name, address, when_human, agent_name):
+    """Reminder R1 - sent from 4pm the calendar day before the tour (Alex
+    2026-08-29). It ASKS rather than announces: the point is to catch the
+    renter who has quietly moved on, before an agent drives across the valley
+    for nobody. Deliberately worded apart from booking_confirmation so the
+    pre-send review gate does not read it as a verbatim repeat."""
+    return (
+        f"Hi {first_name},\n\n"
+        "Quick reminder about your tour:\n\n"
+        f"   {when_human} (Arizona time)\n"
+        f"   {address}\n\n"
+        f"{_meet_line(agent_name)}. Does that still work on your end? A quick "
+        "reply either way is all I need, and if you'd rather come at a "
+        "different time just say so and I'll move it.\n\n"
+        "See you then!\n\n"
+        f"{SIGNATURE}"
+    )
+
+
+def showing_reminder_2h(first_name, address, when_human, agent_name):
+    """Reminder R2 - sent about two hours out. Shorter and more immediate than
+    R1 on purpose: same reason, different words."""
+    return (
+        f"Hi {first_name},\n\n"
+        "Coming up in a couple hours:\n\n"
+        f"   {when_human} (Arizona time)\n"
+        f"   {address}\n\n"
+        f"{_meet_line(agent_name)}. Are you still able to make it? Just a yes "
+        "or no so nobody ends up waiting around. If something came up, no "
+        "problem at all, I'll get you on the calendar another time.\n\n"
+        f"{SIGNATURE}"
+    )
