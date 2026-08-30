@@ -127,8 +127,11 @@ def claim_content_hash(thread_id: str, text: str) -> bool:
             # /reprocess returned dup-content forever, renter stranded).
             # A failure newer than the claim means the renter never got the
             # reply the claim was protecting against duplicating, so a re-run
-            # is a retry, not a dupe. Refresh and let it through.
-            ref.set({"created_at": firestore.SERVER_TIMESTAMP})
+            # is a retry, not a dupe. Do NOT refresh created_at here: the
+            # refresh moved the claim clock past the failure and made the
+            # SECOND retry a dupe again (Schneider, 8/30, three reprocess
+            # rounds). The claim stays anchored to the original processing;
+            # retries keep passing until one actually succeeds.
             return True
         return False
 
