@@ -14,7 +14,10 @@ from datetime import datetime, timedelta
 
 log = logging.getLogger("zillow-instant.llm")
 
-MODEL = "claude-haiku-4-5"
+# Dated snapshot pin (2026-08-30): the bare alias auto-follows whatever
+# Anthropic promotes next, and this pipeline's pins are load-bearing (see the
+# 8/24 Render outage). Bump deliberately, with the golden classify cases green.
+MODEL = "claude-haiku-4-5-20251001"
 
 INTENTS = ["accept_offer", "propose_time", "vague_time", "question",
            "negotiation", "modification_request", "cancellation",
