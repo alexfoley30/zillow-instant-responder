@@ -42,7 +42,30 @@ def composio_execute(tool_slug: str, arguments: dict) -> dict:
     )
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
-            return json.loads(r.read())
+            res = json.loads(r.read())
+        # Composio's calendar validator is mid-rollout (2026-08-28..30): some
+        # instances take the documented string enum for send_updates, others
+        # 400 demanding a boolean (killed Schneider's Monday booking after the
+        # published schema and a live probe both said string). When that exact
+        # complaint comes back, coerce and retry once: "none" -> False,
+        # anything else -> True.
+        err_txt = str(res.get("error") or "") + str((res.get("data") or {}).get("message") or "")
+        if (not res.get("successful", True)
+                and "send_updates" in err_txt and "boolean" in err_txt
+                and isinstance(arguments.get("send_updates"), str)):
+            retry_args = dict(arguments)
+            retry_args["send_updates"] = arguments["send_updates"] != "none"
+            log.warning("Composio %s rejected string send_updates; retrying "
+                        "with boolean %s", tool_slug, retry_args["send_updates"])
+            payload["arguments"] = retry_args
+            req2 = urllib.request.Request(
+                url, data=json.dumps(payload).encode(), method="POST",
+                headers={"x-api-key": COMPOSIO_API_KEY,
+                         "Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req2, timeout=20) as r2:
+                return json.loads(r2.read())
+        return res
     except urllib.error.HTTPError as e:
         log.error("Composio %s HTTP %s: %s", tool_slug, e.code,
                   e.read().decode(errors="ignore")[:300])
