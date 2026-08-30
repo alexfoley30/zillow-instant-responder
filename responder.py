@@ -77,7 +77,7 @@ _AFFIRM_RE = re.compile(
     r"(sounds? good|perfect|great|awesome|will do|works)", re.IGNORECASE)
 
 # Templates that put a live, acceptable offer in front of the renter.
-OFFER_TEMPLATES = ("offer_existing", "offer_existing_p2",
+OFFER_TEMPLATES = ("offer_existing", "offer_existing_p2", "offer_existing_snap",
                    "offer_existing_reply", "propose_times", "counter")
 
 
@@ -788,6 +788,92 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                         "renter sent another message while this one was "
                         "being processed - book by hand", urgent=True)
             return "no-send:superseded-by-newer-message"
+
+        # ADJACENCY SNAP (Alex 2026-08-30: "we always try and consolidate").
+        # T booked 5pm and Schneider 6pm at the same house minutes apart
+        # because consolidate-ONCE was already spent on both threads. When the
+        # renter's own valid proposal lands within an hour of an existing
+        # same-house showing, the existing slot gets offered ONE more time,
+        # framed as convenience and triggered only by their proposal - once
+        # per thread, so the Alec repeat-push pattern cannot come back.
+        # Within five minutes of the existing slot there is nothing left to
+        # negotiate: fold them straight in and confirm the existing time.
+        if not (doc or {}).get("snap_offered") and not dry_run():
+            near = None
+            for hit in cal.find_existing_showings(address, events=events,
+                                                  limit=4):
+                if abs((hit["start_az"] - start_az).total_seconds()) <= 3600:
+                    near = hit
+                    break
+            if near:
+                ev_id = near["event"].get("id", "")
+                diff_s = abs((near["start_az"] - start_az).total_seconds())
+                stage_probe = f"reply__{message_id}"
+                if diff_s <= 300:
+                    verdict = ledger.reserve_send(
+                        thread_id, stage_probe, {"template": "booking_fold_snap"})
+                    if verdict in ("already-sent", "in-flight"):
+                        return f"skipped:{verdict}"
+                    if verdict == "recover":
+                        msgs2 = gm.fetch_thread(thread_id)
+                        if gm.alex_replied_after(msgs2, message_id):
+                            ledger.mark_sent(thread_id, stage_probe,
+                                             recovered="backfilled")
+                            return "skipped:recovered"
+                        if not ledger.takeover_send(thread_id, stage_probe):
+                            return "skipped:takeover-lost"
+                    agent_name = cal.agent_name_from_event(near["event"])
+                    body = T.booking_confirmation(first_name, address,
+                                                  near["when_human"], agent_name)
+                    ok, why = review_gate(thread_id, body, "booking_fold_snap")
+                    if not ok:
+                        ledger.mark_failed(thread_id, stage_probe,
+                                           f"review-blocked: {why}")
+                        _escalate_review_block(thread_id, why, "booking_fold_snap")
+                        return "no-send:review-blocked"
+                    try:
+                        cal.fold_renter_into_event(near["event"], first_name)
+                    except Exception as e:  # noqa: BLE001
+                        ledger.mark_failed(thread_id, stage_probe, f"fold: {e}")
+                        return "skipped:event-failed"
+                    try:
+                        gm.send_reply(thread_id, relay, body)
+                    except Exception as e:  # noqa: BLE001
+                        ledger.mark_failed(thread_id, stage_probe,
+                                           f"send-after-fold: {e} event_id={ev_id}")
+                        return "skipped:send-failed-event-created"
+                    ledger.mark_sent(thread_id, stage_probe, event_id=ev_id)
+                    ledger.transition(thread_id, ledger.BOOKED, event_id=ev_id,
+                                      snap_offered=True)
+                    try:
+                        gm.modify_labels(thread_id, [HANDLED_LABEL],
+                                         [AWAITING_LABEL])
+                    except Exception as e:  # noqa: BLE001
+                        ledger.set_labels_pending(thread_id, stage_probe,
+                                                  [HANDLED_LABEL],
+                                                  [AWAITING_LABEL])
+                        log.error("label failed after snap fold: %s", e)
+                    try:
+                        gm.poke_ping(
+                            f"Booked (joined existing): {first_name} - "
+                            f"{address.split(',')[0]} - {near['when_human']}. [FYI]")
+                    except Exception as e:  # noqa: BLE001
+                        log.error("snap fold FYI ping failed: %s", e)
+                    return "sent"
+                their_when = cal.fmt_showing_time(start_az)
+                result = send_stage(
+                    thread_id, stage_probe, relay,
+                    T.snap_offer(first_name, address, near["when_human"],
+                                 their_when),
+                    [AWAITING_LABEL], [], {"template": "offer_existing_snap"},
+                    message_id)
+                if result == "sent":
+                    ledger.transition(
+                        thread_id, ledger.OFFERED,
+                        offered_start_iso=near["start_az"].isoformat(),
+                        offered_event_id=ev_id,
+                        snap_offered=True)
+                return result
 
         agent, same_day = v["agent"], v["same_day"]
         jace_cover = v.get("jace_cover")

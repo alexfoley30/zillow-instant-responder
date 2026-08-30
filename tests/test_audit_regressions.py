@@ -591,3 +591,87 @@ def test_newest_guard_lets_synthesized_reprocess_through(monkeypatch):
     # the real protection stays: a stale REAL trigger id is still superseded
     assert responder._newer_renter_message_exists(
         "1a0504f3183c6691", "1a0504f3183c6691") is True
+
+
+# ------------------------------------------------- 8. adjacency snap (8/30)
+
+def _snap_harness(monkeypatch, doc, propose_hhmm):
+    """Run book_proposed_time against the Chelsea event with everything
+    side-effectful recorded instead of executed."""
+    calls = {"send_stage": [], "created": [], "folded": [], "transitions": [],
+             "replies": []}
+    ev = _chelsea_event()
+    now, _ = _wed_ctx()
+    d = _next_wed()
+    monkeypatch.setattr(responder.cal, "list_events", lambda n: [ev])
+    monkeypatch.setattr(responder, "_newer_renter_message_exists",
+                        lambda t, m: False)
+    monkeypatch.setattr(responder, "dry_run", lambda: False)
+    monkeypatch.setattr(responder, "review_gate", lambda t, b, k: (True, ""))
+    monkeypatch.setattr(responder, "needs_human",
+                        lambda *a, **k: calls.setdefault("nh", []).append(a))
+    monkeypatch.setattr(
+        responder, "send_stage",
+        lambda tid, stage, relay, body, add, rm, meta, mid=None:
+            calls["send_stage"].append((stage, meta.get("template"), body))
+            or "sent")
+    monkeypatch.setattr(responder.ledger, "reserve_send",
+                        lambda t, s, m: "acquired")
+    monkeypatch.setattr(responder.ledger, "mark_sent", lambda *a, **k: None)
+    monkeypatch.setattr(responder.ledger, "mark_failed", lambda *a, **k: None)
+    monkeypatch.setattr(
+        responder.ledger, "transition",
+        lambda t, st, **f: calls["transitions"].append((st, f)))
+    monkeypatch.setattr(
+        responder.cal, "fold_renter_into_event",
+        lambda event, name: calls["folded"].append((event["id"], name)) or "evC")
+    monkeypatch.setattr(
+        responder.cal, "create_showing_event",
+        lambda a, n, s, ag: calls["created"].append(s) or "evNEW")
+    monkeypatch.setattr(responder.cal, "agent_name_from_event",
+                        lambda e: "Rhett Lueck")
+    monkeypatch.setattr(responder.gm, "send_reply",
+                        lambda t, r, b: calls["replies"].append(b))
+    monkeypatch.setattr(responder.gm, "poke_ping", lambda m: None)
+    monkeypatch.setattr(responder.gm, "modify_labels", lambda *a, **k: None)
+    monkeypatch.setattr(responder.gm, "fetch_thread", lambda t: [])
+    cls = {"time_candidates": [{"date": d.isoformat(), "time": propose_hhmm,
+                                "after": None, "before": None}]}
+    out = responder.book_proposed_time(
+        "t1", doc, "Sam", "2118 S El Marino, Mesa, AZ, 85202",
+        "x@convo.zillow.com", cls, "m9", now)
+    return out, calls
+
+
+def test_snap_offers_existing_slot_within_the_hour(monkeypatch):
+    # Renter declined the first offer, then proposed 16:00 next to the 15:15
+    # showing: one more convenience offer, no second event, offer armed.
+    doc = {"last_reply_template": "offer_existing"}
+    out, calls = _snap_harness(monkeypatch, doc, "16:00")
+    assert out == "sent"
+    assert calls["created"] == [] and calls["folded"] == []
+    assert calls["send_stage"][0][1] == "offer_existing_snap"
+    st, fields = calls["transitions"][0]
+    assert st == responder.ledger.OFFERED
+    assert fields["offered_event_id"] == "evC" and fields["snap_offered"] is True
+
+
+def test_snap_folds_when_minutes_apart(monkeypatch):
+    # 15:18 vs the 15:15 showing: nothing to negotiate, fold + confirm.
+    doc = {"last_reply_template": "offer_existing"}
+    out, calls = _snap_harness(monkeypatch, doc, "15:18")
+    assert out == "sent"
+    assert calls["folded"] == [("evC", "Sam")] and calls["created"] == []
+    assert any("You're all set" in b for b in calls["replies"])
+    st, fields = calls["transitions"][0]
+    assert st == responder.ledger.BOOKED and fields["event_id"] == "evC"
+
+
+def test_snap_fires_once_then_renters_time_books(monkeypatch):
+    # snap already spent: their valid 16:00 books its own event, no third push.
+    doc = {"last_reply_template": "offer_existing_snap", "snap_offered": True}
+    out, calls = _snap_harness(monkeypatch, doc, "16:00")
+    assert out == "sent"
+    assert calls["folded"] == [] and len(calls["created"]) == 1
+    assert not any(t == "offer_existing_snap"
+                   for _, t, _ in calls["send_stage"])

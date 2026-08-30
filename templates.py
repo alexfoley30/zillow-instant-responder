@@ -89,6 +89,23 @@ def booking_confirmation(first_name, address, when_human, agent_name):
     )
 
 
+def snap_offer(first_name, address, when_human, their_when_human):
+    """Adjacency snap (Alex 2026-08-30, "we always try and consolidate"): the
+    renter proposed a valid time within an hour of an existing showing at the
+    same house. One convenience-framed offer of the existing slot, their own
+    time explicitly kept on the table so declining costs nothing."""
+    return (
+        f"Hi {first_name},\n\n"
+        f"{their_when_human} can work! One easier option first: we already have a "
+        f"showing lined up at {address} at {when_human}, just a few minutes "
+        "different. Want to hop on that one instead? You'd get the full "
+        "walkthrough either way.\n\n"
+        f"If {their_when_human} fits your day better, no problem at all, just say "
+        "so and I'll lock yours in.\n\n"
+        f"{SIGNATURE}"
+    )
+
+
 def counter_proposal(first_name, slots_human):
     """Template 4 - their time doesn't work; offer the nearest valid slots."""
     lines = "\n".join(f"   {s} (Arizona time)" for s in slots_human)
