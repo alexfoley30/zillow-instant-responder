@@ -571,3 +571,23 @@ def test_composio_failure_raises_loud(monkeypatch):
     import pytest
     with pytest.raises(RuntimeError):
         cal.fold_renter_into_event(ev, "Sezer")
+
+
+def test_newest_guard_lets_synthesized_reprocess_through(monkeypatch):
+    """A reproc- id processes the newest renter message by construction, so
+    the newer-message guard must not fire on it (Schneider strand, 8/30)."""
+    import responder
+    msgs = [
+        {"sender": "Schneider <x@convo.zillow.com>", "messageId": "1a0504f3183c6691"},
+        {"sender": "Alex Foley <alex@azfoleyhomes.com>", "messageId": "1a0505037ab4ba48"},
+        {"sender": "Schneider <x@convo.zillow.com>", "messageId": "1a0545afd0fe9807"},
+    ]
+    monkeypatch.setattr(responder.gm, "fetch_thread", lambda tid: msgs)
+    monkeypatch.setattr(responder.gm, "is_from_relay",
+                        lambda m: "convo.zillow.com" in m["sender"])
+    monkeypatch.setattr(responder.gm, "msg_id", lambda m: m["messageId"])
+    assert responder._newer_renter_message_exists(
+        "1a0504f3183c6691", "reproc-1a0504f3183c6691-202608301342") is False
+    # the real protection stays: a stale REAL trigger id is still superseded
+    assert responder._newer_renter_message_exists(
+        "1a0504f3183c6691", "1a0504f3183c6691") is True

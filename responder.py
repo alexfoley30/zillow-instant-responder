@@ -97,6 +97,13 @@ def _newer_renter_message_exists(thread_id: str, message_id: str) -> bool:
     for m in msgs:
         if gm.is_from_relay(m):
             newest = gm.msg_id(m)
+    if message_id.startswith("reproc-"):
+        # A synthesized /reprocess id never matches a Gmail id, so the raw
+        # comparison called every thread-level reprocess "superseded" and
+        # blocked the strand-heal path outright (Schneider, 2026-08-30). The
+        # reprocess route resolves the newest renter message by construction,
+        # so by definition nothing newer exists at classify time.
+        return False
     return bool(newest) and newest != message_id
 
 
