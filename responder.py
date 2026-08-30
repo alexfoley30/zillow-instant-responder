@@ -55,8 +55,8 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 # Auth for the watchdog's /reprocess endpoint (separate from the Composio
 # webhook secret so the two can rotate independently).
 REPROCESS_SECRET = os.environ.get("REPROCESS_SECRET", "") or WEBHOOK_SECRET
-AWAITING_LABEL = os.environ.get("AWAITING_RENTER_LABEL_ID", "")
-HANDLED_LABEL = os.environ.get("HANDLED_LABEL_ID", "")
+AWAITING_LABEL = os.environ.get("AWAITING_RENTER_LABEL_ID", "Label_1717014254813700027")
+HANDLED_LABEL = os.environ.get("HANDLED_LABEL_ID", "Label_6932202305849666189")
 NEEDS_REPLY_LABEL = os.environ.get("NEEDS_REPLY_LABEL_ID", "Label_2252577853408309931")
 
 
@@ -1188,10 +1188,22 @@ class Handler(BaseHTTPRequestHandler):
                         log.error("send-approved freshness check failed "
                                   "(continuing): %s", e)
                 stage = f"approved__{ledger.content_hash(answer)}"
+                # Label choice follows the thread's state (2026-08-29, Alex:
+                # "labels aren't mapping right"): an approved answer on a
+                # BOOKED/LEASED/CLOSED thread is a wrap-up, so it lands on
+                # handled - re-applying awaiting-renter left every booked
+                # thread looking open in Gmail. Open states keep the old
+                # behavior: awaiting the renter's next reply.
+                if doc.get("state") in (ledger.BOOKED, ledger.LEASED,
+                                        ledger.CLOSED):
+                    add_l, rm_l = [HANDLED_LABEL], [AWAITING_LABEL,
+                                                    NEEDS_REPLY_LABEL]
+                else:
+                    add_l, rm_l = [AWAITING_LABEL], [NEEDS_REPLY_LABEL]
                 result = send_stage(
                     thread_id, stage, relay,
                     T.approved_answer(first_name, answer),
-                    [AWAITING_LABEL], [NEEDS_REPLY_LABEL],
+                    add_l, rm_l,
                     {"template": "approved_answer", "approved_via": "poke"})
                 if result == "sent" and doc.get("state") in (
                         ledger.NEEDS_HUMAN, ledger.CLOSED):
