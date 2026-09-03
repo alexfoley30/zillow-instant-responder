@@ -221,7 +221,7 @@ def reserve_send(thread_id: str, stage_key: str, meta: dict) -> str:
         snap = ref.get()
         data = snap.to_dict() or {}
         status = data.get("status")
-        if status == "sent":
+        if status in ("sent", "abandoned"):
             return "already-sent"
         reserved_at = data.get("reserved_at")
         age_ok = reserved_at and (_now() - reserved_at) < timedelta(minutes=RESERVE_TTL_MIN)
@@ -241,7 +241,7 @@ def takeover_send(thread_id: str, stage_key: str) -> bool:
     def _tx(tx):
         snap = ref.get(transaction=tx)
         data = snap.to_dict() or {}
-        if data.get("status") == "sent":
+        if data.get("status") in ("sent", "abandoned"):
             return False
         reserved_at = data.get("reserved_at")
         if data.get("status") == "reserved" and reserved_at and \
@@ -290,11 +290,34 @@ def pending_label_docs(limit: int = 20):
 
 
 def stale_reserved_docs(older_than_min: int = 30, limit: int = 20):
+    """Reserved/failed send docs older than the cutoff.
+
+    Single-field query + Python filter on purpose (2026-09-02): the old
+    status+reserved_at compound query needed a composite index that never
+    existed, threw FAILED_PRECONDITION on every tick, and left the service
+    ticker blind - 8 failed docs sat unrecovered for a week (UNFORGET S1/S8).
+    Non-terminal docs number in the dozens at most, so filtering here is free.
+    """
     db = init_db()
     cutoff = _now() - timedelta(minutes=older_than_min)
-    return list(db.collection("zillow_sends")
-                .where("status", "in", ["reserved", "failed"])
-                .where("reserved_at", "<", cutoff).limit(limit).stream())
+    out = []
+    for snap in (db.collection("zillow_sends")
+                 .where("status", "in", ["reserved", "failed"]).limit(200).stream()):
+        reserved_at = (snap.to_dict() or {}).get("reserved_at")
+        if reserved_at is None or reserved_at < cutoff:
+            out.append(snap)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def mark_abandoned(thread_id: str, stage_key: str, reason: str):
+    """Terminal state for a failed send that reality has overtaken (thread
+    leased/closed, or a human already answered). Never retried, never
+    re-reported; distinct from 'sent' so the audit trail stays honest."""
+    _send_ref(thread_id, stage_key).set(
+        {"status": "abandoned", "abandoned_reason": str(reason)[:200],
+         "abandoned_at": firestore.SERVER_TIMESTAMP}, merge=True)
 
 
 # ---------------------------------------------------------------- shadow

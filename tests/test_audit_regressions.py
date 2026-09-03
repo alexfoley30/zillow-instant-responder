@@ -675,3 +675,92 @@ def test_snap_fires_once_then_renters_time_books(monkeypatch):
     assert calls["folded"] == [] and len(calls["created"]) == 1
     assert not any(t == "offer_existing_snap"
                    for _, t, _ in calls["send_stage"])
+
+
+
+# ---------------------------------------------------------------- 2026-09-02
+# UNFORGET S10: booking path ignored the blocked list.
+
+def test_blocked_booking_guard_escalates_instead_of_booking(monkeypatch):
+    pings = []
+    monkeypatch.setattr(responder.ledger, "blocked_addresses",
+                        lambda: ["2118 S El Marino"])
+    monkeypatch.setattr(responder, "needs_human",
+                        lambda tid, name, addr, note, urgent=False: pings.append((tid, note)))
+    hit = responder.blocked_booking_guard(
+        "t1", "Owen", "2118 S El Marino, Mesa, AZ, 85202", "propose_time")
+    assert hit is True
+    assert pings and "leased/blocked" in pings[0][1]
+
+
+def test_blocked_booking_guard_ignores_non_booking_intents_and_open_homes(monkeypatch):
+    pings = []
+    monkeypatch.setattr(responder.ledger, "blocked_addresses",
+                        lambda: ["2118 S El Marino"])
+    monkeypatch.setattr(responder, "needs_human",
+                        lambda *a, **k: pings.append(a))
+    # a question on a blocked home still flows to the fact router / human path
+    assert responder.blocked_booking_guard(
+        "t1", "Owen", "2118 S El Marino, Mesa, AZ, 85202", "question") is False
+    # a booking on an open home is untouched
+    assert responder.blocked_booking_guard(
+        "t2", "Kiara", "3308 S Mariana Cir, Tempe, AZ 85282", "accept_offer") is False
+    assert pings == []
+
+
+def test_blocked_booking_guard_fails_open_on_lookup_error(monkeypatch):
+    def boom():
+        raise RuntimeError("firestore down")
+    monkeypatch.setattr(responder.ledger, "blocked_addresses", boom)
+    assert responder.blocked_booking_guard("t1", "A", "2118 S El Marino", "propose_time") is False
+
+
+# UNFORGET S8: failed sends on closed threads are terminal, not stuck.
+
+def test_recover_stuck_abandons_docs_on_leased_threads(monkeypatch):
+    import cron
+
+    class Snap:
+        def __init__(self, sid, data):
+            self.id, self._d = sid, data
+        def to_dict(self):
+            return self._d
+
+    abandoned, pings, fetched = [], [], []
+    monkeypatch.setattr(cron.ledger, "stale_reserved_docs",
+                        lambda older_than_min=30: [
+                            Snap("tL__reply__m1", {"status": "failed", "trigger_message_id": "m1"}),
+                            Snap("tC__reply__m2", {"status": "failed", "trigger_message_id": "m2"})])
+    monkeypatch.setattr(cron.ledger, "get_thread",
+                        lambda tid: {"state": {"tL": cron.ledger.LEASED,
+                                               "tC": cron.ledger.CLOSED}[tid]})
+    monkeypatch.setattr(cron.ledger, "mark_abandoned",
+                        lambda tid, stage, reason: abandoned.append((tid, stage, reason)))
+    monkeypatch.setattr(cron.gm, "fetch_thread", lambda tid: fetched.append(tid) or [])
+    monkeypatch.setattr(cron.gm, "poke_ping", lambda msg: pings.append(msg))
+    cron._recover_stuck()
+    assert [a[0] for a in abandoned] == ["tL", "tC"]
+    assert "LEASED" in abandoned[0][2] and "CLOSED" in abandoned[1][2]
+    assert fetched == [] and pings == []
+
+
+def test_recover_stuck_still_backfills_open_threads(monkeypatch):
+    import cron
+
+    class Snap:
+        def __init__(self, sid, data):
+            self.id, self._d = sid, data
+        def to_dict(self):
+            return self._d
+
+    sent = []
+    monkeypatch.setattr(cron.ledger, "stale_reserved_docs",
+                        lambda older_than_min=30: [
+                            Snap("tB__reply__m9", {"status": "failed", "trigger_message_id": "m9"})])
+    monkeypatch.setattr(cron.ledger, "get_thread", lambda tid: {"state": cron.ledger.BOOKED})
+    monkeypatch.setattr(cron.ledger, "mark_abandoned", lambda *a: (_ for _ in ()).throw(AssertionError("no")))
+    monkeypatch.setattr(cron.gm, "fetch_thread", lambda tid: ["msg"])
+    monkeypatch.setattr(cron.gm, "alex_replied_after", lambda msgs, mid: True)
+    monkeypatch.setattr(cron.ledger, "mark_sent", lambda tid, stage, **kw: sent.append((tid, kw)))
+    cron._recover_stuck()
+    assert sent == [("tB", {"recovered": "cron-backfill"})]

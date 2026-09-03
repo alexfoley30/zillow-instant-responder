@@ -409,6 +409,31 @@ def handle_negotiation(thread_id: str, first_name: str, relay: str,
 
 # ---------------------------------------------------------------- reply path
 
+def blocked_booking_guard(thread_id: str, first_name: str, address: str,
+                          intent: str) -> bool:
+    """A renter on an existing thread asks to tour a leased/blocked home.
+
+    The blocked list only ever gated NEW inquiries (UNFORGET S10): after a
+    lease-out, toured renters stay BOOKED on purpose - one of them is usually
+    the applicant - so a reply proposing a re-visit could still book a showing
+    at a home that is gone. Escalate, never auto-answer: the applicant may be
+    the one writing, and "this home has been rented" is the wrong email for
+    them. True = caller must stop without booking or sending."""
+    if intent not in ("accept_offer", "propose_time"):
+        return False
+    try:
+        blocked = rules.is_blocked_address(address, ledger.blocked_addresses())
+    except Exception as e:  # noqa: BLE001 - never let the guard itself crash a reply
+        log.error("blocked-address lookup failed %s: %s", thread_id, e)
+        return False
+    if not blocked:
+        return False
+    needs_human(thread_id, first_name, address,
+                "wants a showing at a leased/blocked home - not booked; "
+                "reply by hand (could be the applicant)")
+    return True
+
+
 def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
                  message_id: str) -> str:
     first_name = doc.get("renter_name") or "there"
@@ -512,6 +537,9 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
     if intent == "applied":
         needs_human(thread_id, first_name, address, "submitted an application")
         return "no-send:applied"
+
+    if blocked_booking_guard(thread_id, first_name, address, intent):
+        return "no-send:blocked-address"
 
     if intent == "accept_offer":
         # A yes only books against a LIVE offer (Alec 2026-08-23: week-stale

@@ -58,6 +58,15 @@ def _recover_stuck():
         thread_id, stage_key = key.split("__", 1)
         data = snap.to_dict() or {}
         try:
+            # Reality can overtake a failed send: the home leased, the thread
+            # closed. Those docs are terminal, not stuck - abandon them
+            # quietly instead of pinging a human about a renter we already
+            # told the home is gone (the 8 docs of UNFORGET S8, 2026-09-02).
+            state = (ledger.get_thread(thread_id) or {}).get("state")
+            if state in (ledger.LEASED, ledger.CLOSED):
+                ledger.mark_abandoned(thread_id, stage_key, f"thread {state}")
+                log.info("stale send abandoned (thread %s): %s", state, key)
+                continue
             msgs = gm.fetch_thread(thread_id)
             if gm.alex_replied_after(msgs, data.get("trigger_message_id", "")):
                 ledger.mark_sent(thread_id, stage_key, recovered="cron-backfill")

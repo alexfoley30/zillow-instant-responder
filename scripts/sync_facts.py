@@ -30,6 +30,8 @@ BLOCKED_ADDRESSES = [
     "300 N Gila Springs Blvd",  # Chandler - leased (Alex audit 2026-08-22)
     "1110 E Redfield Rd",    # Tempe 85283 - leased 2026-08-25 ($2,999, Courtney)
     "26009 S New Town Dr",   # Sun Lakes 85248 - leased 2026-08-28 (McCombs/McCawley)
+    "2118 S El Marino",      # Mesa 85202 - lease out for signature 2026-08-31
+    "3308 S Mariana Cir",    # Tempe 85282 - lease out 2026-09-02 ($3,249)
 ]
 
 
