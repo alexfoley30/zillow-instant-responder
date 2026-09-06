@@ -764,3 +764,96 @@ def test_recover_stuck_still_backfills_open_threads(monkeypatch):
     monkeypatch.setattr(cron.ledger, "mark_sent", lambda tid, stage, **kw: sent.append((tid, kw)))
     cron._recover_stuck()
     assert sent == [("tB", {"recovered": "cron-backfill"})]
+
+
+# ---------------------------------------------------------------------------
+# _commit_booking: the three booking paths (fold-on-accept, adjacency snap,
+# new event) used to carry three hand-written copies of the commit sequence
+# and had drifted. These lock the unified behaviour in.
+# ---------------------------------------------------------------------------
+
+def _commit_harness(monkeypatch, send_reply=None):
+    calls = {"failed": [], "sent": [], "transitions": [], "labels": [],
+             "pings": [], "pending": []}
+    monkeypatch.setattr(responder, "dry_run", lambda: False)
+    monkeypatch.setattr(responder, "review_gate", lambda t, b, k: (True, ""))
+    monkeypatch.setattr(responder.ledger, "reserve_send",
+                        lambda t, s, m: "acquired")
+    monkeypatch.setattr(responder.ledger, "mark_sent",
+                        lambda t, s, **kw: calls["sent"].append((s, kw)))
+    monkeypatch.setattr(responder.ledger, "mark_failed",
+                        lambda t, s, why: calls["failed"].append((s, why)))
+    monkeypatch.setattr(responder.ledger, "set_labels_pending",
+                        lambda *a: calls["pending"].append(a))
+    monkeypatch.setattr(responder.ledger, "transition",
+                        lambda t, st, **f: calls["transitions"].append((st, f)))
+    monkeypatch.setattr(responder.gm, "modify_labels",
+                        lambda t, a, r: calls["labels"].append((a, r)))
+    monkeypatch.setattr(responder.gm, "poke_ping",
+                        lambda m: calls["pings"].append(m))
+    monkeypatch.setattr(responder.gm, "fetch_thread", lambda t: [])
+    monkeypatch.setattr(
+        responder.gm, "send_reply",
+        send_reply or (lambda t, r, b: None))
+    return calls
+
+
+def test_commit_booking_records_start_and_agent_on_every_path(monkeypatch):
+    # The snap-fold copy used to transition with only event_id + snap_offered:
+    # a booking with no booked_start_iso and no agent on the thread doc.
+    calls = _commit_harness(monkeypatch)
+    out = responder._commit_booking(
+        "t1", "reply__m1", "x@convo.zillow.com", "Sam", "2118 S El Marino",
+        "m1", when_human="Wednesday, September 9, at 3:15 PM",
+        agent_name="Rhett Lueck", template="booking_fold_snap",
+        calendar_op=lambda: "evC", ping="Booked (joined existing). [FYI]",
+        booked_start_iso="2026-09-09T15:15:00-07:00", snap_offered=True)
+    assert out == "sent"
+    st, fields = calls["transitions"][0]
+    assert st == responder.ledger.BOOKED
+    assert fields["event_id"] == "evC"
+    assert fields["agent"] == "Rhett Lueck"
+    assert fields["booked_start_iso"] == "2026-09-09T15:15:00-07:00"
+    assert fields["snap_offered"] is True
+    assert calls["sent"] == [("reply__m1", {"event_id": "evC"})]
+    assert calls["labels"] == [([responder.HANDLED_LABEL],
+                                [responder.AWAITING_LABEL])]
+
+
+def test_commit_booking_keeps_event_id_when_the_send_fails(monkeypatch):
+    # The fold-on-accept copy wrapped fold+send in ONE try and recorded
+    # str(e) as "skipped:book-failed" - the renter was on the calendar with
+    # no confirmation and nothing pointed at the event.
+    def boom(t, r, b):
+        raise RuntimeError("gmail 503")
+
+    calls = _commit_harness(monkeypatch, send_reply=boom)
+    out = responder._commit_booking(
+        "t1", "booked__evC", "x@convo.zillow.com", "Sam", "2118 S El Marino",
+        "m1", when_human="Wednesday, September 9, at 3:15 PM",
+        agent_name="Rhett Lueck", template="booking_fold",
+        calendar_op=lambda: "evC", ping="unused",
+        booked_start_iso="2026-09-09T15:15:00-07:00")
+    assert out == "skipped:send-failed-event-created"
+    stage, why = calls["failed"][0]
+    assert stage == "booked__evC" and "event_id=evC" in why
+    assert calls["transitions"] == [] and calls["pings"] == []
+
+
+def test_commit_booking_never_sends_when_the_calendar_fails(monkeypatch):
+    calls = _commit_harness(monkeypatch)
+    replies = []
+    monkeypatch.setattr(responder.gm, "send_reply",
+                        lambda t, r, b: replies.append(b))
+
+    def boom():
+        raise RuntimeError("composio 400")
+
+    out = responder._commit_booking(
+        "t1", "reply__m1", "x@convo.zillow.com", "Sam", "2118 S El Marino",
+        "m1", when_human="Wednesday, September 9, at 3:15 PM",
+        agent_name="Alex Foley", template="booking_new",
+        calendar_op=boom, ping="unused")
+    assert out == "skipped:event-failed"
+    assert replies == [] and calls["transitions"] == []
+    assert "composio 400" in calls["failed"][0][1]

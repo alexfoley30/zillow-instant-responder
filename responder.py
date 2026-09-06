@@ -671,6 +671,72 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
     return "no-send:needs-human"
 
 
+def _commit_booking(thread_id: str, stage_key: str, relay: str, first_name: str,
+                    address: str, message_id: str, when_human: str,
+                    agent_name: str, template: str, calendar_op, ping: str,
+                    **transition_fields) -> str:
+    """The ONE booking commit sequence. Every path that puts a renter on the
+    calendar goes through here, in the fixed ATOMIC BOOKING TRIPWIRE order:
+
+        reserve -> review -> calendar -> send -> mark_sent -> labels
+        -> state -> FYI ping
+
+    `calendar_op` is a zero-arg callable that folds or creates and returns the
+    event id; everything else the three paths used to differ on (stage key,
+    template name, confirmation copy inputs, FYI text, extra state fields)
+    comes in as an argument. Returns 'sent' | 'skipped:<why>' |
+    'no-send:review-blocked'.
+    """
+    verdict = ledger.reserve_send(thread_id, stage_key, {"template": template})
+    if verdict in ("already-sent", "in-flight"):
+        return f"skipped:{verdict}"
+    if verdict == "recover":
+        msgs = gm.fetch_thread(thread_id)
+        if gm.alex_replied_after(msgs, message_id):
+            ledger.mark_sent(thread_id, stage_key, recovered="backfilled")
+            return "skipped:recovered"
+        if not ledger.takeover_send(thread_id, stage_key):
+            return "skipped:takeover-lost"
+
+    body = T.booking_confirmation(first_name, address, when_human, agent_name)
+    ok, why = review_gate(thread_id, body, template)
+    if not ok:
+        ledger.mark_failed(thread_id, stage_key, f"review-blocked: {why}")
+        _escalate_review_block(thread_id, why, template)
+        return "no-send:review-blocked"
+
+    try:
+        event_id = calendar_op()  # event FIRST, always
+    except Exception as e:  # noqa: BLE001
+        ledger.mark_failed(thread_id, stage_key, f"calendar: {e}")
+        return "skipped:event-failed"
+    try:
+        gm.send_reply(thread_id, relay, body)
+    except Exception as e:  # noqa: BLE001
+        # The calendar already moved. Record the event id so the stuck-send
+        # sweep and a human can find what was created without a reply.
+        ledger.mark_failed(thread_id, stage_key,
+                           f"send-after-event: {e} event_id={event_id}")
+        return "skipped:send-failed-event-created"
+
+    ledger.mark_sent(thread_id, stage_key, event_id=event_id)
+    try:
+        gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
+    except Exception as e:  # noqa: BLE001 - label failure NEVER resends
+        ledger.set_labels_pending(thread_id, stage_key,
+                                  [HANDLED_LABEL], [AWAITING_LABEL])
+        log.error("label failed after %s: %s", template, e)
+    ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
+                      agent=agent_name, **transition_fields)
+    # Booked FYI on EVERY booking (Alex 2026-08-23: v2 only pinged cover
+    # assignments; regular bookings reached the calendar but never his phone).
+    try:
+        gm.poke_ping(ping)
+    except Exception as e:  # noqa: BLE001
+        log.error("booked FYI ping failed (%s): %s", template, e)
+    return "sent"
+
+
 def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) -> str:
     """Renter said yes to the offered existing slot -> fold in + confirm.
     Books against the EVENT THAT WAS OFFERED when the thread recorded one -
@@ -714,45 +780,15 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
         })
         return "shadowed"
 
-    verdict = ledger.reserve_send(thread_id, stage, {"template": "booking_fold"})
-    if verdict in ("already-sent", "in-flight"):
-        return f"skipped:{verdict}"
-    if verdict == "recover":
-        msgs = gm.fetch_thread(thread_id)
-        if gm.alex_replied_after(msgs, message_id):
-            ledger.mark_sent(thread_id, stage, recovered="backfilled")
-            return "skipped:recovered"
-        if not ledger.takeover_send(thread_id, stage):
-            return "skipped:takeover-lost"
-
-    body = T.booking_confirmation(first_name, address,
-                                  existing["when_human"], agent_name)
-    ok, why = review_gate(thread_id, body, "booking_fold")
-    if not ok:
-        ledger.mark_failed(thread_id, stage, f"review-blocked: {why}")
-        _escalate_review_block(thread_id, why, "booking_fold")
-        return "no-send:review-blocked"
-    try:
-        cal.fold_renter_into_event(existing["event"], first_name)  # event FIRST
-        gm.send_reply(thread_id, relay, body)
-    except Exception as e:  # noqa: BLE001
-        ledger.mark_failed(thread_id, stage, str(e))
-        return "skipped:book-failed"
-    ledger.mark_sent(thread_id, stage, event_id=event_id)
-    try:
-        gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
-    except Exception as e:  # noqa: BLE001
-        ledger.set_labels_pending(thread_id, stage, [HANDLED_LABEL], [AWAITING_LABEL])
-        log.error("label failed after fold: %s", e)
-    ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
-                      booked_start_iso=existing["start_az"].isoformat(),
-                      agent=agent_name)
-    try:
-        gm.poke_ping(f"Booked (added to existing showing): {first_name} - "
-                     f"{address.split(',')[0]} - {existing['when_human']}. [FYI]")
-    except Exception as e:  # noqa: BLE001
-        log.error("fold FYI ping failed: %s", e)
-    return "sent"
+    return _commit_booking(
+        thread_id, stage, relay, first_name, address, message_id,
+        when_human=existing["when_human"], agent_name=agent_name,
+        template="booking_fold",
+        calendar_op=lambda: cal.fold_renter_into_event(existing["event"],
+                                                       first_name),
+        ping=(f"Booked (added to existing showing): {first_name} - "
+              f"{address.split(',')[0]} - {existing['when_human']}. [FYI]"),
+        booked_start_iso=existing["start_az"].isoformat())
 
 
 def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
@@ -838,56 +874,18 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                 diff_s = abs((near["start_az"] - start_az).total_seconds())
                 stage_probe = f"reply__{message_id}"
                 if diff_s <= 300:
-                    verdict = ledger.reserve_send(
-                        thread_id, stage_probe, {"template": "booking_fold_snap"})
-                    if verdict in ("already-sent", "in-flight"):
-                        return f"skipped:{verdict}"
-                    if verdict == "recover":
-                        msgs2 = gm.fetch_thread(thread_id)
-                        if gm.alex_replied_after(msgs2, message_id):
-                            ledger.mark_sent(thread_id, stage_probe,
-                                             recovered="backfilled")
-                            return "skipped:recovered"
-                        if not ledger.takeover_send(thread_id, stage_probe):
-                            return "skipped:takeover-lost"
-                    agent_name = cal.agent_name_from_event(near["event"])
-                    body = T.booking_confirmation(first_name, address,
-                                                  near["when_human"], agent_name)
-                    ok, why = review_gate(thread_id, body, "booking_fold_snap")
-                    if not ok:
-                        ledger.mark_failed(thread_id, stage_probe,
-                                           f"review-blocked: {why}")
-                        _escalate_review_block(thread_id, why, "booking_fold_snap")
-                        return "no-send:review-blocked"
-                    try:
-                        cal.fold_renter_into_event(near["event"], first_name)
-                    except Exception as e:  # noqa: BLE001
-                        ledger.mark_failed(thread_id, stage_probe, f"fold: {e}")
-                        return "skipped:event-failed"
-                    try:
-                        gm.send_reply(thread_id, relay, body)
-                    except Exception as e:  # noqa: BLE001
-                        ledger.mark_failed(thread_id, stage_probe,
-                                           f"send-after-fold: {e} event_id={ev_id}")
-                        return "skipped:send-failed-event-created"
-                    ledger.mark_sent(thread_id, stage_probe, event_id=ev_id)
-                    ledger.transition(thread_id, ledger.BOOKED, event_id=ev_id,
-                                      snap_offered=True)
-                    try:
-                        gm.modify_labels(thread_id, [HANDLED_LABEL],
-                                         [AWAITING_LABEL])
-                    except Exception as e:  # noqa: BLE001
-                        ledger.set_labels_pending(thread_id, stage_probe,
-                                                  [HANDLED_LABEL],
-                                                  [AWAITING_LABEL])
-                        log.error("label failed after snap fold: %s", e)
-                    try:
-                        gm.poke_ping(
-                            f"Booked (joined existing): {first_name} - "
-                            f"{address.split(',')[0]} - {near['when_human']}. [FYI]")
-                    except Exception as e:  # noqa: BLE001
-                        log.error("snap fold FYI ping failed: %s", e)
-                    return "sent"
+                    return _commit_booking(
+                        thread_id, stage_probe, relay, first_name, address,
+                        message_id, when_human=near["when_human"],
+                        agent_name=cal.agent_name_from_event(near["event"]),
+                        template="booking_fold_snap",
+                        calendar_op=lambda: cal.fold_renter_into_event(
+                            near["event"], first_name),
+                        ping=(f"Booked (joined existing): {first_name} - "
+                              f"{address.split(',')[0]} - "
+                              f"{near['when_human']}. [FYI]"),
+                        booked_start_iso=near["start_az"].isoformat(),
+                        snap_offered=True)
                 their_when = cal.fmt_showing_time(start_az)
                 result = send_stage(
                     thread_id, stage_probe, relay,
@@ -924,57 +922,18 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
             })
             return "shadowed"
 
-        stage_probe = f"reply__{message_id}"
-        verdict = ledger.reserve_send(thread_id, stage_probe,
-                                      {"template": "booking_new"})
-        if verdict in ("already-sent", "in-flight"):
-            return f"skipped:{verdict}"
-        if verdict == "recover":
-            msgs = gm.fetch_thread(thread_id)
-            if gm.alex_replied_after(msgs, message_id):
-                ledger.mark_sent(thread_id, stage_probe, recovered="backfilled")
-                return "skipped:recovered"
-            if not ledger.takeover_send(thread_id, stage_probe):
-                return "skipped:takeover-lost"
-
-        body = T.booking_confirmation(first_name, address, when_human,
-                                      agent["name"])
-        ok, why = review_gate(thread_id, body, "booking_new")
-        if not ok:
-            ledger.mark_failed(thread_id, stage_probe, f"review-blocked: {why}")
-            _escalate_review_block(thread_id, why, "booking_new")
-            return "no-send:review-blocked"
-        try:
-            event_id = cal.create_showing_event(address, first_name, start_az, agent)
-        except Exception as e:  # noqa: BLE001
-            ledger.mark_failed(thread_id, stage_probe, f"create_event: {e}")
-            return "skipped:event-failed"
-        try:
-            gm.send_reply(thread_id, relay, body)
-        except Exception as e:  # noqa: BLE001
-            ledger.mark_failed(thread_id, stage_probe, f"send-after-event: {e} "
-                               f"event_id={event_id}")
-            return "skipped:send-failed-event-created"
-        ledger.mark_sent(thread_id, stage_probe, event_id=event_id)
-        try:
-            gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
-        except Exception as e:  # noqa: BLE001
-            ledger.set_labels_pending(thread_id, stage_probe,
-                                      [HANDLED_LABEL], [AWAITING_LABEL])
-            log.error("label failed after booking: %s", e)
-        ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
-                          booked_start_iso=start_az.isoformat(), agent=agent["name"])
-        # Booked FYI on EVERY booking (Alex 2026-08-23: v2 only pinged cover
-        # assignments; regular bookings reached the calendar but never his
-        # phone). Cover bookings keep the urgent reply-fast copy.
-        try:
-            gm.poke_ping(jace_ping or (
+        # Cover bookings keep the urgent reply-fast copy as their FYI.
+        return _commit_booking(
+            thread_id, f"reply__{message_id}", relay, first_name, address,
+            message_id, when_human=when_human, agent_name=agent["name"],
+            template="booking_new",
+            calendar_op=lambda: cal.create_showing_event(address, first_name,
+                                                         start_az, agent),
+            ping=jace_ping or (
                 f"Booked: {first_name} - {address.split(',')[0]} - "
                 f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} with "
-                f"{agent['name'].split()[0]}. [FYI]"))
-        except Exception as e:  # noqa: BLE001
-            log.error("booked FYI ping failed: %s", e)
-        return "sent"
+                f"{agent['name'].split()[0]}. [FYI]"),
+            booked_start_iso=start_az.isoformat())
 
     # No candidate survived validation -> counter with nearest valid slots.
     try:
