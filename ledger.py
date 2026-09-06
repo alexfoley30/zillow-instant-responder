@@ -381,7 +381,3 @@ def get_facts(addr_slug: str) -> str | None:
     except Exception as e:  # noqa: BLE001
         log.error("get_facts(%s) failed: %s", addr_slug, e)
         return None
-
-
-def get_standing_rules() -> str | None:
-    return get_facts("_standing_rules")
