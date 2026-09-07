@@ -82,14 +82,8 @@ def _recover_stuck():
                 note = (f"Stuck half-sent reply on thread {thread_id} "
                         f"(stage {stage_key}) - check the Gmail thread before "
                         "anyone emails this renter.")
-                try:
-                    gm.poke_ping("Needs you: " + note)
-                except Exception as e:  # noqa: BLE001
-                    log.error("stuck-send ping failed: %s", e)
-                try:
-                    gm.alert_email(f"Needs you: stuck send {thread_id}", note)
-                except Exception as e:  # noqa: BLE001
-                    log.error("stuck-send alert email failed: %s", e)
+                gm.escalate(f"Needs you: stuck send {thread_id}",
+                            "Needs you: " + note)
         except Exception as e:  # noqa: BLE001
             log.error("recover check failed %s: %s", key, e)
 

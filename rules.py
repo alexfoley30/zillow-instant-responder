@@ -3,7 +3,18 @@
 Ports the scheduling rules from the sweep SKILL.md into code:
 windows, 2-hour minimum notice, SAME-DAY LADDER (Jace default), drive-time
 gap tiers, away-block detection, same-property matching, agent selection.
+
+KEEP THIS MODULE IMPORTABLE ON PYTHON 3.9. scripts/shadow_dump.py runs under
+Apple's /usr/bin/python3 (3.9) and imports these rules directly rather than
+keeping its own copy of them - the copy it used to carry had silently drifted
+back into two bugs this file had already fixed. The `from __future__ import
+annotations` below is what makes that work: 3.9 evaluates annotations at def
+time and chokes on PEP 604 `X | None`, and the future import defers them to
+strings. So: no `match` statements, and nothing newer than 3.9 outside an
+annotation.
 """
+
+from __future__ import annotations
 
 import re
 from datetime import datetime, time, timedelta
@@ -60,16 +71,27 @@ def _number_present(number: str, haystack: str) -> bool:
 
 def same_property(address: str, haystack: str) -> bool:
     """Same-property-only rule: BOTH street number and street-name core present."""
-    number, core = number_and_core((address or "").split(",")[0])
+    number, core = number_and_core(street_only(address))
     if not number or not core:
         return False
     hay = (haystack or "").lower()
     return _number_present(number, hay) and core in hay
 
 
+def street_only(address: str) -> str:
+    """'1641 E Coronado Rd, Phoenix, AZ 85006' -> '1641 E Coronado Rd'.
+    What a human wants to read in a ping or a calendar title."""
+    return (address or "").split(",")[0].strip()
+
+
+def first_name_of(full_name: str) -> str:
+    """'Jace Johnson' -> 'Jace'. Pings address the agent by first name."""
+    return (full_name or "").split()[0] if (full_name or "").strip() else ""
+
+
 def addr_slug(address: str) -> str:
     """'1641 E Coronado Rd, Phoenix...' -> '1641-e-coronado-rd' (fact-sheet key)."""
-    street = (address or "").split(",")[0].strip().lower()
+    street = street_only(address).lower()
     return re.sub(r"[^a-z0-9]+", "-", street).strip("-")
 
 
