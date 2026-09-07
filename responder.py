@@ -188,6 +188,31 @@ def _escalate_review_block(thread_id: str, reason: str, template: str):
                 urgent=True)
 
 
+def _apply_labels(thread_id: str, add: list, remove: list,
+                  stage_key: str = "", context: str = "label"):
+    """Apply a label change after a successful action. A label failure NEVER
+    fails the action that earned it (it must never trigger a resend): with a
+    stage_key the change is queued for cron's _retry_labels, without one it is
+    logged and dropped - the no-send paths have no stage doc to hang it on."""
+    try:
+        if add or remove:
+            gm.modify_labels(thread_id, add, remove)
+    except Exception as e:  # noqa: BLE001
+        if stage_key:
+            ledger.set_labels_pending(thread_id, stage_key, add, remove)
+        log.error("%s failed %s%s (%s): %s", context, thread_id,
+                  f" {stage_key}" if stage_key else "",
+                  "queued for retry" if stage_key else "not retried", e)
+
+
+def _relabel_handled(thread_id: str, stage_key: str = "",
+                     context: str = "relabel"):
+    """The one shape every "we're done with this thread" path wants:
+    +handled, -awaiting-renter."""
+    _apply_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL],
+                  stage_key, context)
+
+
 def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
                labels_add: list, labels_remove: list, meta: dict,
                trigger_message_id: str = "") -> str:
@@ -241,12 +266,7 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
     except Exception:  # noqa: BLE001 - bookkeeping only, never blocks
         pass
 
-    try:
-        if labels_add or labels_remove:
-            gm.modify_labels(thread_id, labels_add, labels_remove)
-    except Exception as e:  # noqa: BLE001 - label failure NEVER triggers a resend
-        log.error("label failed %s %s (queued for retry): %s", thread_id, stage_key, e)
-        ledger.set_labels_pending(thread_id, stage_key, labels_add, labels_remove)
+    _apply_labels(thread_id, labels_add, labels_remove, stage_key)
 
     return "sent"
 
@@ -502,10 +522,7 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
         # booking it is a decline ("will only be there 3 mos - thnx"), and the
         # reschedule ask reads tone-deaf - first live send 2026-08-04 (Kathy).
         if not doc.get("event_id") and state != ledger.BOOKED:
-            try:
-                gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
-            except Exception as e:  # noqa: BLE001
-                log.error("decline relabel failed: %s", e)
+            _relabel_handled(thread_id, context="decline relabel")
             ledger.transition(thread_id, ledger.CLOSED)
             return "no-send:decline"
         return handle_cancellation(thread_id, doc, first_name, relay,
@@ -515,11 +532,8 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
         return "skipped:leased-thread"
 
     if intent == "benign_closer":
-        try:
-            if not dry_run():
-                gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
-        except Exception as e:  # noqa: BLE001
-            log.error("benign relabel failed: %s", e)
+        if not dry_run():
+            _relabel_handled(thread_id, context="benign relabel")
         return "no-send:benign"
 
     if intent == "negotiation":
@@ -739,11 +753,7 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
         ledger.mark_failed(thread_id, stage, str(e))
         return "skipped:book-failed"
     ledger.mark_sent(thread_id, stage, event_id=event_id)
-    try:
-        gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
-    except Exception as e:  # noqa: BLE001
-        ledger.set_labels_pending(thread_id, stage, [HANDLED_LABEL], [AWAITING_LABEL])
-        log.error("label failed after fold: %s", e)
+    _relabel_handled(thread_id, stage, "label after fold")
     ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
                       booked_start_iso=existing["start_az"].isoformat(),
                       agent=agent_name)
@@ -873,14 +883,8 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                     ledger.mark_sent(thread_id, stage_probe, event_id=ev_id)
                     ledger.transition(thread_id, ledger.BOOKED, event_id=ev_id,
                                       snap_offered=True)
-                    try:
-                        gm.modify_labels(thread_id, [HANDLED_LABEL],
-                                         [AWAITING_LABEL])
-                    except Exception as e:  # noqa: BLE001
-                        ledger.set_labels_pending(thread_id, stage_probe,
-                                                  [HANDLED_LABEL],
-                                                  [AWAITING_LABEL])
-                        log.error("label failed after snap fold: %s", e)
+                    _relabel_handled(thread_id, stage_probe,
+                                     "label after snap fold")
                     try:
                         gm.poke_ping(
                             f"Booked (joined existing): {first_name} - "
@@ -956,12 +960,7 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                                f"event_id={event_id}")
             return "skipped:send-failed-event-created"
         ledger.mark_sent(thread_id, stage_probe, event_id=event_id)
-        try:
-            gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
-        except Exception as e:  # noqa: BLE001
-            ledger.set_labels_pending(thread_id, stage_probe,
-                                      [HANDLED_LABEL], [AWAITING_LABEL])
-            log.error("label failed after booking: %s", e)
+        _relabel_handled(thread_id, stage_probe, "label after booking")
         ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
                           booked_start_iso=start_az.isoformat(), agent=agent["name"])
         # Booked FYI on EVERY booking (Alex 2026-08-23: v2 only pinged cover
