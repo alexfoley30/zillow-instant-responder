@@ -188,6 +188,25 @@ def _escalate_review_block(thread_id: str, reason: str, template: str):
                 urgent=True)
 
 
+def _booked_ping(label: str, first_name: str, address: str, when_human: str,
+                 tail: str = "[FYI]") -> str:
+    """The one shape every booking notification takes. Alex reads these on his
+    phone, so the order is fixed: what happened, who, where, when."""
+    return (f"{label}: {first_name} - {rules.street_only(address)} - "
+            f"{when_human}. {tail}").strip()
+
+
+def _send_booked_ping(label: str, first_name: str, address: str,
+                      when_human: str, tail: str = "[FYI]"):
+    """Booking pings are never load-bearing: the calendar write and the renter
+    email have already happened by the time one goes out, so a ping failure is
+    logged and swallowed rather than failing a booking that did succeed."""
+    try:
+        gm.poke_ping(_booked_ping(label, first_name, address, when_human, tail))
+    except Exception as e:  # noqa: BLE001
+        log.error("%s FYI ping failed: %s", label, e)
+
+
 def _apply_labels(thread_id: str, add: list, remove: list,
                   stage_key: str = "", context: str = "label"):
     """Apply a label change after a successful action. A label failure NEVER
@@ -284,39 +303,26 @@ def needs_human(thread_id: str, first_name: str, address: str, last_line: str,
             (datetime.now(AZ_TZ).astimezone(last_ping.tzinfo) - last_ping) < timedelta(days=1)):
         return
     tag = "URGENT same-day: " if urgent else "Needs you: "
-    msg = (f'{tag}{first_name} — {address.split(",")[0]} — '
+    msg = (f'{tag}{first_name} — {rules.street_only(address)} — '
            f'"{(last_line or "")[:80]}". Reply with your answer and I will '
            f'send it to the renter. [zt:{thread_id}]')
     if dry_run():
         ledger.write_shadow(thread_id, f"poke__{ledger.content_hash(msg)}",
                             {"would_poke": msg})
     else:
-        # Poke has returned success while delivering nothing (2026-08-23),
-        # so every escalation ALSO goes out as email. The rate-limit stamp
-        # is written ONLY when at least one channel succeeded (bug-echo
-        # 2026-08-27: stamping on double-failure suppressed the retry and
-        # the escalation vanished with only Render logs to show for it).
-        delivered = False
-        try:
-            delivered = bool(gm.poke_ping(msg))
-        except Exception as e:  # noqa: BLE001
-            log.error("poke ping failed: %s", e)
-        try:
-            delivered = bool(gm.alert_email(
-                f"{tag}{first_name} - {address.split(',')[0]}",
-                msg + "\n\nSent by the Zillow pipeline (email backup channel; "
-                      "Poke delivery is unreliable). Reply to the renter via "
-                      "the thread in Gmail, or answer this Needs-you in "
-                      "chat.")) or delivered
-        except Exception as e:  # noqa: BLE001
-            log.error("alert email failed: %s", e)
+        # The rate-limit stamp is written ONLY when a channel succeeded, so a
+        # double failure leaves the next run free to retry.
+        delivered = gm.escalate(
+            f"{tag}{first_name} - {rules.street_only(address)}", msg,
+            "\n\nSent by the Zillow pipeline (email backup channel; "
+            "Poke delivery is unreliable). Reply to the renter via the "
+            "thread in Gmail, or answer this Needs-you in chat.")
         if delivered:
             ledger.upsert_thread(
                 thread_id, last_needs_human_ping_at=datetime.now(AZ_TZ))
         else:
-            log.error("ESCALATION UNDELIVERED on BOTH channels for %s (%s) - "
-                      "ping stamp withheld so the next run retries", thread_id,
-                      first_name)
+            log.error("escalation undelivered for %s (%s) - ping stamp "
+                      "withheld so the next run retries", thread_id, first_name)
 
 
 # ---------------------------------------------------------------- new inquiry
@@ -757,11 +763,8 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
     ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
                       booked_start_iso=existing["start_az"].isoformat(),
                       agent=agent_name)
-    try:
-        gm.poke_ping(f"Booked (added to existing showing): {first_name} - "
-                     f"{address.split(',')[0]} - {existing['when_human']}. [FYI]")
-    except Exception as e:  # noqa: BLE001
-        log.error("fold FYI ping failed: %s", e)
+    _send_booked_ping("Booked (added to existing showing)", first_name,
+                      address, existing["when_human"])
     return "sent"
 
 
@@ -885,12 +888,8 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                                       snap_offered=True)
                     _relabel_handled(thread_id, stage_probe,
                                      "label after snap fold")
-                    try:
-                        gm.poke_ping(
-                            f"Booked (joined existing): {first_name} - "
-                            f"{address.split(',')[0]} - {near['when_human']}. [FYI]")
-                    except Exception as e:  # noqa: BLE001
-                        log.error("snap fold FYI ping failed: %s", e)
+                    _send_booked_ping("Booked (joined existing)", first_name,
+                                      address, near["when_human"])
                     return "sent"
                 their_when = cal.fmt_showing_time(start_az)
                 result = send_stage(
@@ -910,11 +909,13 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         agent, same_day = v["agent"], v["same_day"]
         jace_cover = v.get("jace_cover")
         when_human = cal.fmt_showing_time(start_az)
+        agent_first = rules.first_name_of(agent["name"])
         jace_ping = None
         if same_day or jace_cover:
             reason = "same-day" if same_day else "Alex booked"
-            jace_ping = (f"{agent['name'].split()[0]} assigned: {first_name} at {address.split(',')[0]} "
-                         f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - {reason}. "
+            jace_ping = (f"{agent_first} assigned: {first_name} at "
+                         f"{rules.street_only(address)} "
+                         f"{cal.fmt_ping_time(start_az)} - {reason}. "
                          "Conflict? Reply fast.")
 
         if dry_run():
@@ -966,13 +967,15 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         # Booked FYI on EVERY booking (Alex 2026-08-23: v2 only pinged cover
         # assignments; regular bookings reached the calendar but never his
         # phone). Cover bookings keep the urgent reply-fast copy.
-        try:
-            gm.poke_ping(jace_ping or (
-                f"Booked: {first_name} - {address.split(',')[0]} - "
-                f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} with "
-                f"{agent['name'].split()[0]}. [FYI]"))
-        except Exception as e:  # noqa: BLE001
-            log.error("booked FYI ping failed: %s", e)
+        if jace_ping:
+            try:
+                gm.poke_ping(jace_ping)
+            except Exception as e:  # noqa: BLE001
+                log.error("cover assignment ping failed: %s", e)
+        else:
+            _send_booked_ping(
+                "Booked", first_name, address,
+                f"{cal.fmt_ping_time(start_az)} with {agent_first}")
         return "sent"
 
     # No candidate survived validation -> counter with nearest valid slots.

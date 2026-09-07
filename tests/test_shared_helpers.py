@@ -130,3 +130,104 @@ def test_classify_reply_falls_back_to_regex_when_the_key_is_missing(monkeypatch)
                              datetime(2026, 9, 7, 9, 0, tzinfo=rules.AZ_TZ))
     assert out["_fallback"] is True
     assert out["intent"] in llm.INTENTS
+
+
+# ------------------------------------------------------- address / name / time
+
+def test_street_only_drops_everything_after_the_street():
+    import rules
+    assert rules.street_only("1641 E Coronado Rd, Phoenix, AZ 85006") == \
+        "1641 E Coronado Rd"
+    assert rules.street_only("1641 E Coronado Rd") == "1641 E Coronado Rd"
+    assert rules.street_only("  3309 E San Remo Ave , Gilbert") == \
+        "3309 E San Remo Ave"
+    assert rules.street_only(None) == ""
+    assert rules.street_only("") == ""
+
+
+def test_first_name_of():
+    import rules
+    assert rules.first_name_of("Jace Johnson") == "Jace"
+    assert rules.first_name_of("Alex") == "Alex"
+    assert rules.first_name_of("   ") == ""
+    assert rules.first_name_of(None) == ""
+
+
+def test_fmt_ping_time_is_the_terse_form():
+    from datetime import datetime
+    import calendar_logic as cal
+    import rules
+    when = datetime(2026, 9, 9, 18, 30, tzinfo=rules.AZ_TZ)   # a Wednesday
+    assert cal.fmt_ping_time(when) == "Wed 9/9 6:30 PM"
+
+
+# --------------------------------------------------------------- booked pings
+
+def test_booked_ping_shape():
+    assert responder._booked_ping(
+        "Booked", "Anna", "1641 E Coronado Rd, Phoenix, AZ 85006",
+        "Wed 9/9 6:30 PM with Jace") == \
+        "Booked: Anna - 1641 E Coronado Rd - Wed 9/9 6:30 PM with Jace. [FYI]"
+
+
+def test_booked_ping_failure_never_breaks_a_completed_booking(monkeypatch):
+    """The calendar write and the renter email are already done by the time a
+    ping goes out, so a dead Poke must not turn a success into a failure."""
+    def boom(_msg):
+        raise RuntimeError("poke down")
+    monkeypatch.setattr(responder.gm, "poke_ping", boom)
+    responder._send_booked_ping("Booked", "Anna", "1 Main St", "now")
+
+
+# ---------------------------------------------------------- dual-channel alert
+
+def test_escalate_reports_true_if_either_channel_lands(monkeypatch):
+    import gmail_client as gm
+    monkeypatch.setattr(gm, "poke_ping", lambda m: False)
+    monkeypatch.setattr(gm, "alert_email", lambda s, b: True)
+    assert gm.escalate("subj", "msg") is True
+
+    monkeypatch.setattr(gm, "poke_ping", lambda m: True)
+    monkeypatch.setattr(gm, "alert_email", lambda s, b: False)
+    assert gm.escalate("subj", "msg") is True
+
+
+def test_escalate_reports_false_only_when_both_fail(monkeypatch):
+    """needs_human stamps its 1/day rate limit on this answer, so a wrong
+    True silently swallows the retry."""
+    import gmail_client as gm
+    monkeypatch.setattr(gm, "poke_ping", lambda m: False)
+    monkeypatch.setattr(gm, "alert_email", lambda s, b: False)
+    assert gm.escalate("subj", "msg") is False
+
+
+def test_escalate_survives_either_channel_raising(monkeypatch):
+    import gmail_client as gm
+
+    def boom(*_a):
+        raise RuntimeError("down")
+    monkeypatch.setattr(gm, "poke_ping", boom)
+    monkeypatch.setattr(gm, "alert_email", lambda s, b: True)
+    assert gm.escalate("subj", "msg") is True
+
+    monkeypatch.setattr(gm, "poke_ping", lambda m: True)
+    monkeypatch.setattr(gm, "alert_email", boom)
+    assert gm.escalate("subj", "msg") is True
+
+    monkeypatch.setattr(gm, "poke_ping", boom)
+    monkeypatch.setattr(gm, "alert_email", boom)
+    assert gm.escalate("subj", "msg") is False
+
+
+def test_email_only_note_never_reaches_the_text_message(monkeypatch):
+    """The ping becomes an SMS. 'Reply to the renter via the thread in Gmail'
+    is inbox advice and has no business in one."""
+    import gmail_client as gm
+    seen = {}
+    monkeypatch.setattr(gm, "poke_ping",
+                        lambda m: seen.__setitem__("ping", m) or True)
+    monkeypatch.setattr(gm, "alert_email",
+                        lambda s, b: seen.__setitem__("email", b) or True)
+    gm.escalate("subj", "core message", "\n\nlong inbox-only footer")
+    assert seen["ping"] == "core message"
+    assert seen["email"] == "core message\n\nlong inbox-only footer"

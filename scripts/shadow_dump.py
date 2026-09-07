@@ -15,10 +15,13 @@ RUN IT WITH APPLE PYTHON. This is not a preference:
 
   * /usr/bin/python3 (3.9.6) is the ONLY interpreter here with firebase_admin
     + google-cloud-firestore installed. Homebrew 3.13/3.14 lack them.
-  * Because it is 3.9, this file must NOT import ledger/rules/calendar_logic/
-    facts/gmail_client/llm - they use PEP 604 `X | None` annotations that
-    raise TypeError at import on 3.9. The ~30 lines we need from rules.py are
-    reimplemented below and must be kept in sync with it.
+  * rules.py IS imported (it carries `from __future__ import annotations`, so
+    its PEP 604 `X | None` annotations no longer blow up on 3.9). It used to
+    be hand-mirrored here, and the mirror drifted back into two bugs rules.py
+    had already fixed: a substring street-number match that made 1641 hit
+    16413, and a window check that let 11:30 PM pass. An audit reporting the
+    wrong answer is worse than no audit, so the copy is gone. ledger /
+    calendar_logic / facts / gmail_client / llm still must NOT be imported.
   * Credentials come from the service-account JSON, never ADC (ADC here is
     stale, has no quota_project_id, and hangs ~300s before failing).
 """
@@ -31,7 +34,7 @@ import re
 import subprocess
 import sys
 import warnings
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 warnings.filterwarnings("ignore")  # 3.9 EOL FutureWarning + LibreSSL notice
 # grpc spews "FD from fork parent still in poll list" across stdout when the
@@ -46,6 +49,18 @@ try:
 except ImportError as e:
     sys.exit(f"ERROR: {e}\nRun with /usr/bin/python3 - it is the only "
              f"interpreter here with firebase_admin installed.")
+
+# The scheduling rules come from the real module, never a copy of it. Fail
+# loudly if that stops working on 3.9 rather than quietly auditing against
+# stale rules: a wrong answer here is worse than no answer.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    import rules
+except Exception as e:  # noqa: BLE001
+    sys.exit(f"ERROR: cannot import rules.py ({e.__class__.__name__}: {e}).\n"
+             f"rules.py must stay importable on this interpreter "
+             f"({sys.version.split()[0]}) - see the note at the top of both "
+             f"files. Fix the import rather than re-copying the rules here.")
 
 SA_PATH = os.path.expanduser("~/.config/boundless/firebase-sa.json")
 PROJECT_ID = "boundless-portal-c94d0"
@@ -75,47 +90,13 @@ NAMED_CASES = ["Anna", "alondra", "Lyndsey"]
 def is_poke_stage(stage_key):
     return (stage_key or "").startswith("poke__")
 
-# ---- mirrored from rules.py (cannot import it on 3.9) --------------------
-SHOWING_WINDOWS = {           # weekday(): Mon=0 .. Sun=6
-    0: (time(10, 0), time(18, 30)), 1: (time(10, 0), time(15, 0)),
-    2: (time(10, 0), time(18, 30)), 3: (time(10, 0), time(15, 0)),
-    4: (time(10, 0), time(18, 30)), 5: (time(10, 0), time(14, 0)),
-    6: (time(10, 0), time(14, 0)),
-}
-MIN_NOTICE_HOURS = 2
-SHOWING_MINUTES = 30
-KNOWN_AGENTS = {"Alex Foley", "Jace Johnson", "Rhett Lueck"}
-_DIRECTIONALS = {"n", "s", "e", "w", "ne", "nw", "se", "sw",
-                 "north", "south", "east", "west"}
-_STREET_TYPES = {"ave", "avenue", "st", "street", "dr", "drive", "rd", "road",
-                 "ln", "lane", "ct", "court", "blvd", "boulevard", "way",
-                 "pl", "place", "cir", "circle", "trl", "trail", "pkwy",
-                 "parkway", "loop", "ter", "terrace"}
-
-
-def number_and_core(address):
-    """'3309 E San Remo Ave' -> ('3309', 'san remo')."""
-    tokens = re.findall(r"[a-z0-9']+", (address or "").lower())
-    if not tokens or not tokens[0].isdigit():
-        return None, None
-    core = [t for t in tokens[1:]
-            if t not in _DIRECTIONALS and t not in _STREET_TYPES]
-    return tokens[0], " ".join(core)
-
-
-def addr_matches(blocked, address):
-    """Fuzzy match, same semantics as rules.is_blocked_address."""
-    number, core = number_and_core(blocked)
-    if not number or not core:
-        return False
-    a = (address or "").lower()
-    return number in a and core in a
-
-
-def in_window(start):
-    lo, hi = SHOWING_WINDOWS[start.weekday()]
-    end = (start + timedelta(minutes=SHOWING_MINUTES)).time()
-    return lo <= start.time() and end <= hi
+# ---- scheduling rules: taken from rules.py, never copied -----------------
+MIN_NOTICE_HOURS = rules.MIN_NOTICE_HOURS
+_STREET_TYPES = rules._STREET_TYPES
+in_window = rules.in_window
+# Derived, so putting an agent on the roster in rules.py also stops this
+# audit calling their bookings "unknown agent".
+KNOWN_AGENTS = {a["name"] for a in rules.AGENTS.values()}
 
 
 # ---- read-only guard ----------------------------------------------------
@@ -404,7 +385,7 @@ def check_blocklist(bundle, threads):
         exposed = []
         if not present:
             for t in threads.values():
-                if not addr_matches(addr, t.get("address") or ""):
+                if not rules.is_blocked_address(t.get("address") or "", [addr]):
                     continue
                 stages = [e["template"] or e["stage_key"] for e in t["events"]]
                 if any(s == "leased" for s in stages):
