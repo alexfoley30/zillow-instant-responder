@@ -188,30 +188,39 @@ def _escalate_review_block(thread_id: str, reason: str, template: str):
                 urgent=True)
 
 
-def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
-               labels_add: list, labels_remove: list, meta: dict,
-               trigger_message_id: str = "") -> str:
-    """The ONLY function that sends renter email. Wins the Firestore lock or
-    does nothing. Returns 'sent' | 'shadowed' | 'skipped:<why>'."""
-    meta = dict(meta)
-    meta.update({
+def send_meta(stage_key: str, relay: str, body: str, meta: dict,
+              trigger_message_id: str = "") -> dict:
+    """The audit fields every renter-facing send records on its lock doc.
+
+    body_sha256 in particular is load-bearing: it is what the shadow audit
+    (scripts/shadow_dump.py) dedupes on, and trigger_message_id is what
+    cron._recover_stuck feeds to alex_replied_after. The three booking paths
+    used to reserve with a bare {"template": ...}, so booking confirmations
+    were the one class of send missing both."""
+    full = dict(meta)
+    full.update({
         "template": meta.get("template", stage_key),
         "body_sha256": ledger.content_hash(body),
         "to_relay": relay,
         "trigger_message_id": trigger_message_id,
     })
+    return full
 
-    if dry_run():
-        ledger.write_shadow(thread_id, stage_key, {
-            "would_body": body, "would_labels_add": labels_add,
-            "would_labels_remove": labels_remove, **meta,
-        })
-        log.info("SHADOW %s %s", thread_id, stage_key)
-        return "shadowed"
 
+def claim_send(thread_id: str, stage_key: str, meta: dict,
+               trigger_message_id: str = "") -> str | None:
+    """Win the Firestore send lock for (thread, stage), or return the verdict
+    string the caller must return instead. None means we own the lock.
+
+    Every renter-facing send goes through this ladder: send_stage for
+    ordinary replies, and the three booking paths, which cannot use
+    send_stage because they have to create or fold a calendar event between
+    winning the lock and sending. Those three used to carry their own copies
+    of it, and the copies had drifted (thin meta, different skip strings,
+    no logging)."""
     verdict = ledger.reserve_send(thread_id, stage_key, meta)
     if verdict in ("already-sent", "in-flight"):
-        log.info("send_stage skip (%s): %s %s", verdict, thread_id, stage_key)
+        log.info("send skip (%s): %s %s", verdict, thread_id, stage_key)
         return f"skipped:{verdict}"
     if verdict == "recover":
         # Ambiguity resolves against the source of truth: the thread itself.
@@ -221,12 +230,44 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
             return "skipped:recovered-already-sent"
         if not ledger.takeover_send(thread_id, stage_key):
             return "skipped:takeover-lost"
+    return None
 
-    ok, why = review_gate(thread_id, body, meta.get("template", stage_key))
-    if not ok:
-        ledger.mark_failed(thread_id, stage_key, f"review-blocked: {why}")
-        _escalate_review_block(thread_id, why, meta.get("template", stage_key))
-        return "no-send:review-blocked"
+
+def review_or_block(thread_id: str, stage_key: str, body: str,
+                    template: str) -> str | None:
+    """Pre-send review for a stage whose lock we already hold. None means
+    clear to send; otherwise the verdict string to return. Marks the lock
+    failed and escalates, so a blocked stage is never silently dropped."""
+    ok, why = review_gate(thread_id, body, template)
+    if ok:
+        return None
+    ledger.mark_failed(thread_id, stage_key, f"review-blocked: {why}")
+    _escalate_review_block(thread_id, why, template)
+    return "no-send:review-blocked"
+
+
+def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
+               labels_add: list, labels_remove: list, meta: dict,
+               trigger_message_id: str = "") -> str:
+    """The ONLY function that sends renter email. Wins the Firestore lock or
+    does nothing. Returns 'sent' | 'shadowed' | 'skipped:<why>'."""
+    meta = send_meta(stage_key, relay, body, meta, trigger_message_id)
+
+    if dry_run():
+        ledger.write_shadow(thread_id, stage_key, {
+            "would_body": body, "would_labels_add": labels_add,
+            "would_labels_remove": labels_remove, **meta,
+        })
+        log.info("SHADOW %s %s", thread_id, stage_key)
+        return "shadowed"
+
+    claimed = claim_send(thread_id, stage_key, meta, trigger_message_id)
+    if claimed:
+        return claimed
+
+    blocked = review_or_block(thread_id, stage_key, body, meta["template"])
+    if blocked:
+        return blocked
 
     try:
         gm.send_reply(thread_id, relay, body)
@@ -705,33 +746,24 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
     event_id = existing["event"].get("id", "")
     agent_name = cal.agent_name_from_event(existing["event"])
     stage = f"booked__{event_id}"
+    body = T.booking_confirmation(first_name, address,
+                                  existing["when_human"], agent_name)
+    meta = send_meta(stage, relay, body, {"template": "booking_fold"}, message_id)
     if dry_run():
         ledger.write_shadow(thread_id, stage, {
             "would_calendar": {"fold": True, "event_id": event_id,
                                "renter": first_name},
-            "would_body": T.booking_confirmation(
-                first_name, address, existing["when_human"], agent_name),
+            "would_body": body, **meta,
         })
         return "shadowed"
 
-    verdict = ledger.reserve_send(thread_id, stage, {"template": "booking_fold"})
-    if verdict in ("already-sent", "in-flight"):
-        return f"skipped:{verdict}"
-    if verdict == "recover":
-        msgs = gm.fetch_thread(thread_id)
-        if gm.alex_replied_after(msgs, message_id):
-            ledger.mark_sent(thread_id, stage, recovered="backfilled")
-            return "skipped:recovered"
-        if not ledger.takeover_send(thread_id, stage):
-            return "skipped:takeover-lost"
+    claimed = claim_send(thread_id, stage, meta, message_id)
+    if claimed:
+        return claimed
 
-    body = T.booking_confirmation(first_name, address,
-                                  existing["when_human"], agent_name)
-    ok, why = review_gate(thread_id, body, "booking_fold")
-    if not ok:
-        ledger.mark_failed(thread_id, stage, f"review-blocked: {why}")
-        _escalate_review_block(thread_id, why, "booking_fold")
-        return "no-send:review-blocked"
+    blocked = review_or_block(thread_id, stage, body, "booking_fold")
+    if blocked:
+        return blocked
     try:
         cal.fold_renter_into_event(existing["event"], first_name)  # event FIRST
         gm.send_reply(thread_id, relay, body)
@@ -838,27 +870,20 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                 diff_s = abs((near["start_az"] - start_az).total_seconds())
                 stage_probe = f"reply__{message_id}"
                 if diff_s <= 300:
-                    verdict = ledger.reserve_send(
-                        thread_id, stage_probe, {"template": "booking_fold_snap"})
-                    if verdict in ("already-sent", "in-flight"):
-                        return f"skipped:{verdict}"
-                    if verdict == "recover":
-                        msgs2 = gm.fetch_thread(thread_id)
-                        if gm.alex_replied_after(msgs2, message_id):
-                            ledger.mark_sent(thread_id, stage_probe,
-                                             recovered="backfilled")
-                            return "skipped:recovered"
-                        if not ledger.takeover_send(thread_id, stage_probe):
-                            return "skipped:takeover-lost"
                     agent_name = cal.agent_name_from_event(near["event"])
                     body = T.booking_confirmation(first_name, address,
                                                   near["when_human"], agent_name)
-                    ok, why = review_gate(thread_id, body, "booking_fold_snap")
-                    if not ok:
-                        ledger.mark_failed(thread_id, stage_probe,
-                                           f"review-blocked: {why}")
-                        _escalate_review_block(thread_id, why, "booking_fold_snap")
-                        return "no-send:review-blocked"
+                    claimed = claim_send(
+                        thread_id, stage_probe,
+                        send_meta(stage_probe, relay, body,
+                                  {"template": "booking_fold_snap"}, message_id),
+                        message_id)
+                    if claimed:
+                        return claimed
+                    blocked = review_or_block(thread_id, stage_probe, body,
+                                              "booking_fold_snap")
+                    if blocked:
+                        return blocked
                     try:
                         cal.fold_renter_into_event(near["event"], first_name)
                     except Exception as e:  # noqa: BLE001
@@ -913,37 +938,30 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                          f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - {reason}. "
                          "Conflict? Reply fast.")
 
+        stage_probe = f"reply__{message_id}"
+        body = T.booking_confirmation(first_name, address, when_human,
+                                      agent["name"])
+        meta = send_meta(stage_probe, relay, body,
+                         {"template": "booking_new"}, message_id)
+
         if dry_run():
             ledger.write_shadow(thread_id, f"booked__pending_{message_id}", {
                 "would_calendar": {"create": True, "start": start_az.isoformat(),
                                    "agent": agent["name"], "same_day": same_day,
                                    "jace_cover": jace_cover},
-                "would_body": T.booking_confirmation(first_name, address,
-                                                     when_human, agent["name"]),
+                "would_body": body,
                 "would_poke": jace_ping,
+                **meta,
             })
             return "shadowed"
 
-        stage_probe = f"reply__{message_id}"
-        verdict = ledger.reserve_send(thread_id, stage_probe,
-                                      {"template": "booking_new"})
-        if verdict in ("already-sent", "in-flight"):
-            return f"skipped:{verdict}"
-        if verdict == "recover":
-            msgs = gm.fetch_thread(thread_id)
-            if gm.alex_replied_after(msgs, message_id):
-                ledger.mark_sent(thread_id, stage_probe, recovered="backfilled")
-                return "skipped:recovered"
-            if not ledger.takeover_send(thread_id, stage_probe):
-                return "skipped:takeover-lost"
+        claimed = claim_send(thread_id, stage_probe, meta, message_id)
+        if claimed:
+            return claimed
 
-        body = T.booking_confirmation(first_name, address, when_human,
-                                      agent["name"])
-        ok, why = review_gate(thread_id, body, "booking_new")
-        if not ok:
-            ledger.mark_failed(thread_id, stage_probe, f"review-blocked: {why}")
-            _escalate_review_block(thread_id, why, "booking_new")
-            return "no-send:review-blocked"
+        blocked = review_or_block(thread_id, stage_probe, body, "booking_new")
+        if blocked:
+            return blocked
         try:
             event_id = cal.create_showing_event(address, first_name, start_az, agent)
         except Exception as e:  # noqa: BLE001
