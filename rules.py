@@ -3,97 +3,53 @@
 Ports the scheduling rules from the sweep SKILL.md into code:
 windows, 2-hour minimum notice, SAME-DAY LADDER (Jace default), drive-time
 gap tiers, away-block detection, same-property matching, agent selection.
+
+The window/address/agent primitives live in rules_core.py and are re-exported
+below, so scripts/shadow_dump.py (Python 3.9, cannot import this module) can
+share them instead of keeping a hand-copied mirror in sync.
 """
 
 import re
 from datetime import datetime, time, timedelta
-from zoneinfo import ZoneInfo
 
-AZ_TZ = ZoneInfo("America/Phoenix")
-
-# Showing windows (America/Phoenix). weekday(): Mon=0 .. Sun=6
-SHOWING_WINDOWS = {
-    0: (time(10, 0), time(18, 30)),  # Mon
-    1: (time(10, 0), time(15, 0)),   # Tue
-    2: (time(10, 0), time(18, 30)),  # Wed
-    3: (time(10, 0), time(15, 0)),   # Thu
-    4: (time(10, 0), time(18, 30)),  # Fri
-    5: (time(10, 0), time(14, 0)),   # Sat
-    6: (time(10, 0), time(14, 0)),   # Sun
-}
-
-MIN_NOTICE_HOURS = 2          # same-day allowed since 2026-07-27
-SHOWING_MINUTES = 30
-
-ALEX = {"name": "Alex Foley", "email": "alex@azfoleyhomes.com"}
-JACE = {"name": "Jace Johnson", "email": "jacejohnson.re@gmail.com"}
-RHETT = {"name": "Rhett Lueck", "email": "rhettlueck@gmail.com"}
-BRIANNA_VIEWER = "azfoleyhomes@gmail.com"  # viewer only, NEVER the agent
-AGENTS = {"alex": ALEX, "jace": JACE, "rhett": RHETT}
-
-_DIRECTIONALS = {"n", "s", "e", "w", "ne", "nw", "se", "sw",
-                 "north", "south", "east", "west"}
-_STREET_TYPES = {"ave", "avenue", "st", "street", "dr", "drive", "rd", "road",
-                 "ln", "lane", "ct", "court", "blvd", "boulevard", "way",
-                 "pl", "place", "cir", "circle", "trl", "trail", "pkwy",
-                 "parkway", "loop", "ter", "terrace"}
+# Primitives shared with scripts/shadow_dump.py, which cannot import this module
+# (it runs on 3.9 and this file uses PEP 604 annotations). Re-exported here so
+# `rules.X` keeps working for every existing caller.
+from rules_core import (  # noqa: F401 - re-exported as part of the rules API
+    AGENT_NAMES,
+    AGENTS,
+    ALEX,
+    AZ_TZ,
+    BRIANNA_VIEWER,
+    JACE,
+    MIN_NOTICE_HOURS,
+    RHETT,
+    SHOWING_MINUTES,
+    SHOWING_WINDOWS,
+    _DIRECTIONALS,
+    _STREET_TYPES,
+    addr_slug,
+    address_matches,
+    in_window,
+    number_and_core,
+    number_present,
+)
 
 _AWAY_RE = re.compile(
     r"(out of town|ooo|out of office|vacation|trip\b|stay at|travel|hotel|"
     r"lodge|resort)", re.IGNORECASE)
 
 
-def number_and_core(address: str):
-    """'3309 E San Remo Ave' -> ('3309', 'san remo'); (None, None) if unparseable."""
-    tokens = re.findall(r"[a-z0-9']+", (address or "").lower())
-    if not tokens or not tokens[0].isdigit():
-        return None, None
-    core = [t for t in tokens[1:] if t not in _DIRECTIONALS and t not in _STREET_TYPES]
-    return tokens[0], " ".join(core)
-
-
-def _number_present(number: str, haystack: str) -> bool:
-    """Whole-token street-number match: '1641' must not match inside '16413'
-    (regression test caught the substring version blocking the wrong house)."""
-    return re.search(rf"\b{re.escape(number)}\b", haystack) is not None
-
-
 def same_property(address: str, haystack: str) -> bool:
     """Same-property-only rule: BOTH street number and street-name core present."""
-    number, core = number_and_core((address or "").split(",")[0])
-    if not number or not core:
-        return False
-    hay = (haystack or "").lower()
-    return _number_present(number, hay) and core in hay
-
-
-def addr_slug(address: str) -> str:
-    """'1641 E Coronado Rd, Phoenix...' -> '1641-e-coronado-rd' (fact-sheet key)."""
-    street = (address or "").split(",")[0].strip().lower()
-    return re.sub(r"[^a-z0-9]+", "-", street).strip("-")
+    return address_matches(address, haystack)
 
 
 def is_blocked_address(address: str, blocked_list: list) -> bool:
-    a = (address or "").lower()
-    for blocked in blocked_list or []:
-        number, core = number_and_core(blocked)
-        if number and core and _number_present(number, a) and core in a:
-            return True
-    return False
+    return any(address_matches(blocked, address) for blocked in blocked_list or [])
 
 
 # ---------------------------------------------------------------- windows
-
-def in_window(start_az: datetime) -> bool:
-    lo, hi = SHOWING_WINDOWS[start_az.weekday()]
-    end_dt = start_az + timedelta(minutes=SHOWING_MINUTES)
-    # A slot that crosses midnight wrapped .time() to 00:00 and passed the
-    # close check - 11:30 PM counted as "in window" (round-2 shadow, Lyndsey).
-    if end_dt.date() != start_az.date():
-        return False
-    # start inside window and the 30-min slot must end by window close
-    return lo <= start_az.time() and end_dt.time() <= hi
-
 
 def min_notice_ok(start_az: datetime, now_az: datetime) -> bool:
     return start_az >= now_az + timedelta(hours=MIN_NOTICE_HOURS)
