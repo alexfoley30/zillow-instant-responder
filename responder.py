@@ -45,6 +45,7 @@ import ledger
 import llm
 import rules
 import templates as T
+import website_lead
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("zillow-instant")
@@ -1226,6 +1227,10 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, f"zillow-pipeline ok (dry_run={dry_run()})")
 
     def do_POST(self):
+        if self.path.startswith(website_lead.PATH_PREFIX):
+            # Netlify form webhook: token lives in the URL, see website_lead.py
+            self._website_lead()
+            return
         secret = self.headers.get("X-Webhook-Secret", "")
         required = (REPROCESS_SECRET
                     if self.path.rstrip("/") in ("/reprocess", "/send-approved")
@@ -1356,6 +1361,24 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             log.exception("handler error")
             self._send(200, f"error-logged: {e}")
+
+    def _website_lead(self):
+        if not website_lead.path_matches(self.path):
+            self._send(404, "not found")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            payload = json.loads(raw or b"{}")
+        except Exception as e:  # noqa: BLE001
+            self._send(400, f"bad json: {e}")
+            return
+        try:
+            code, text = website_lead.handle(payload, gm.poke_ping)
+        except Exception as e:  # noqa: BLE001
+            log.exception("website lead handler error")
+            code, text = 200, f"error-logged: {e}"
+        self._send(code, text)
 
     def log_message(self, *args):
         pass
