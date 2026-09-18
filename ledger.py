@@ -394,9 +394,6 @@ def get_standing_rules() -> str | None:
 # when the lease was signed for THIS renter, and are written only by a person
 # (scripts/application.py), never by the responder.
 
-APPLICATION_FIELDS = ("application_by", "application_at", "application_note",
-                      "application_logged_at", "lease_signed_at")
-
 AGENT_NAMES = {
     "alex": "Alex Foley",
     "jace": "Jace Johnson",
