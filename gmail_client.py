@@ -27,6 +27,23 @@ ALEX_EMAIL = "alex@azfoleyhomes.com"
 POKE_ENDPOINT = os.environ.get("POKE_ENDPOINT", "")
 
 
+def _post_json(url: str, payload: dict, headers: dict = None,
+               timeout: int = 20) -> bytes:
+    """POST `payload` as JSON; return the raw response body.
+
+    Every outbound call in this module is this same four-line block. Written
+    out per call site they drifted on timeout and on whether the body was
+    parsed at all, so the shape lives here once and callers decide only what
+    to do with the bytes.
+    """
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(), method="POST",
+        headers={"Content-Type": "application/json", **(headers or {})},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
 def composio_execute(tool_slug: str, arguments: dict) -> dict:
     """Call a Composio tool via the v3 execute endpoint. Attaches the Gmail
     connected-account id only to GMAIL_* tools (calendar tools resolve via the
@@ -35,14 +52,9 @@ def composio_execute(tool_slug: str, arguments: dict) -> dict:
     payload = {"user_id": COMPOSIO_USER_ID, "arguments": arguments}
     if CONNECTED_ACCOUNT_ID.startswith("ca_") and tool_slug.startswith("GMAIL_"):
         payload["connected_account_id"] = CONNECTED_ACCOUNT_ID
-    body = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url, data=body, method="POST",
-        headers={"x-api-key": COMPOSIO_API_KEY, "Content-Type": "application/json"},
-    )
+    auth = {"x-api-key": COMPOSIO_API_KEY}
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            res = json.loads(r.read())
+        res = json.loads(_post_json(url, payload, auth))
         # Composio's calendar validator is mid-rollout (2026-08-28..30): some
         # instances take the documented string enum for send_updates, others
         # 400 demanding a boolean (killed Schneider's Monday booking after the
@@ -58,13 +70,7 @@ def composio_execute(tool_slug: str, arguments: dict) -> dict:
             log.warning("Composio %s rejected string send_updates; retrying "
                         "with boolean %s", tool_slug, retry_args["send_updates"])
             payload["arguments"] = retry_args
-            req2 = urllib.request.Request(
-                url, data=json.dumps(payload).encode(), method="POST",
-                headers={"x-api-key": COMPOSIO_API_KEY,
-                         "Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req2, timeout=20) as r2:
-                return json.loads(r2.read())
+            return json.loads(_post_json(url, payload, auth))
         return res
     except urllib.error.HTTPError as e:
         log.error("Composio %s HTTP %s: %s", tool_slug, e.code,
@@ -436,27 +442,17 @@ def poke_ping(message: str) -> bool:
     poke.com/kitchen). Falls back to legacy POKE_ENDPOINT, then no-op."""
     if POKE_API_KEY:
         try:
-            req = urllib.request.Request(
-                POKE_V2_URL,
-                data=json.dumps({"message": message}).encode(),
-                method="POST",
-                headers={"Content-Type": "application/json",
-                         "Authorization": f"Bearer {POKE_API_KEY}"})
-            with urllib.request.urlopen(req, timeout=10) as r:
-                r.read()
-                return True
+            _post_json(POKE_V2_URL, {"message": message},
+                       {"Authorization": f"Bearer {POKE_API_KEY}"}, timeout=10)
+            return True
         except Exception as e:  # noqa: BLE001
             log.error("poke v2 ping failed (falling back to legacy): %s", e)
     if not POKE_ENDPOINT:
         log.warning("POKE_ENDPOINT not configured - ping skipped: %s", message[:80])
         return False
     try:
-        req = urllib.request.Request(
-            POKE_ENDPOINT,
-            data=json.dumps({"message": message}).encode(),
-            method="POST", headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read()).get("success", False)
+        body = _post_json(POKE_ENDPOINT, {"message": message}, timeout=10)
+        return json.loads(body).get("success", False)
     except Exception as e:  # noqa: BLE001
         log.error("poke_ping failed: %s", e)
         return False
