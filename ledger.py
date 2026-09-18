@@ -20,6 +20,7 @@ anything except winning that create.
 import hashlib
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import firebase_admin
@@ -385,3 +386,83 @@ def get_facts(addr_slug: str) -> str | None:
 
 def get_standing_rules() -> str | None:
     return get_facts("_standing_rules")
+
+
+# ------------------------------------------- application attribution (2026-09-17)
+# Alex: "i rented all those houses, not jace". The `agent` field only says who
+# opened the door for a showing. These fields say who took the application and
+# when the lease was signed for THIS renter, and are written only by a person
+# (scripts/application.py), never by the responder.
+
+APPLICATION_FIELDS = ("application_by", "application_at", "application_note",
+                      "application_logged_at", "lease_signed_at")
+
+AGENT_NAMES = {
+    "alex": "Alex Foley",
+    "jace": "Jace Johnson",
+    "rhett": "Rhett Lueck",
+    "cody": "Cody Wood",
+    "brianna": "Brianna Foley",
+    "bre": "Brianna Foley",
+    "alexa": "Alexa Jefferson",
+}
+
+
+def agent_full_name(who: str) -> str:
+    """'jace' / 'Jace' / 'Jace Johnson' -> 'Jace Johnson'. Unknown names pass
+    through untouched so a new teammate can still be logged."""
+    key = (who or "").strip().lower()
+    if key in AGENT_NAMES:
+        return AGENT_NAMES[key]
+    first = key.split()[0] if key else ""
+    return AGENT_NAMES.get(first, (who or "").strip())
+
+
+def street_key(address: str) -> str:
+    """Exact-match key for a property: house number + street words, nothing
+    after the first comma, lowercase alphanumerics. '1294 E Apricot Ln, Gilbert,
+    AZ 85298' and '1294 E Apricot Ln, Gilbert, AZ, 85298' collapse to the same
+    key; '1294 E Apricot' does NOT match it (no substring matching)."""
+    head = (address or "").split(",")[0]
+    return re.sub(r"[^a-z0-9]", "", head.lower())
+
+
+def first_name_key(name: str) -> str:
+    """First token of a name, lowercase alphanumerics. 'Kim' never matches
+    'Kimberly' because the comparison is equality, not containment."""
+    tokens = re.findall(r"[A-Za-z0-9']+", name or "")
+    return re.sub(r"[^a-z0-9]", "", tokens[0].lower()) if tokens else ""
+
+
+def match_threads(threads: list, property_query: str, renter_first: str) -> list:
+    """Threads whose property street key equals the query's and whose renter
+    first name equals the given one. Both keys must be non-empty."""
+    pk, nk = street_key(property_query), first_name_key(renter_first)
+    if not pk or not nk:
+        return []
+    return [t for t in threads
+            if street_key(t.get("property_address", "")) == pk
+            and first_name_key(t.get("renter_name", "")) == nk]
+
+
+def list_threads() -> list:
+    db = init_db()
+    return [dict(snap.to_dict() or {}, id=snap.id)
+            for snap in db.collection("zillow_threads").stream()]
+
+
+def set_application(thread_id: str, by: str, at: str = "", note: str = "",
+                    lease_signed_at: str = "") -> dict:
+    """Record who took the application for one renter thread. `at` and
+    `lease_signed_at` are YYYY-MM-DD strings or empty when unknown; an empty
+    value is stored as empty, never guessed."""
+    fields = {
+        "application_by": agent_full_name(by),
+        "application_at": at or "",
+        "application_note": note or "",
+        "application_logged_at": firestore.SERVER_TIMESTAMP,
+    }
+    if lease_signed_at:
+        fields["lease_signed_at"] = lease_signed_at
+    upsert_thread(thread_id, **fields)
+    return fields
