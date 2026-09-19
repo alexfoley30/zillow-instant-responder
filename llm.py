@@ -83,25 +83,33 @@ Return:
 If the newest message mixes intents (question + time), pick the intent that drives scheduling and still fill question_text."""
 
 
+def _json_call(api_key: str, prompt: str, schema: dict, max_tokens: int) -> dict:
+    """The one Haiku call in this pipeline: a single user turn that must come
+    back as JSON matching `schema`. Raises on any failure - both callers own
+    their own fallback (regex classify / fail-open review), and collapsing
+    those two into one policy here would blur the reason codes Alex sees."""
+    import anthropic
+    client = anthropic.Anthropic(api_key=api_key, timeout=10.0, max_retries=1)
+    resp = client.messages.create(
+        model=MODEL,
+        max_tokens=max_tokens,
+        output_config={"format": {"type": "json_schema", "schema": schema}},
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = next((b.text for b in resp.content if b.type == "text"), "")
+    return json.loads(text)
+
+
 def _api_call(renter_text: str, transcript: str, now_phx: datetime) -> dict | None:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key, timeout=10.0, max_retries=1)
-        resp = client.messages.create(
-            model=MODEL,
-            max_tokens=1536,
-            output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
-            messages=[{"role": "user", "content": PROMPT.format(
-                now=now_phx.strftime("%A, %B %d, %Y at %I:%M %p"),
-                transcript=(transcript or "(no earlier messages)")[:9000],
-                renter_text=(renter_text or "")[:3000],
-            )}],
-        )
-        text = next((b.text for b in resp.content if b.type == "text"), "")
-        return json.loads(text)
+        return _json_call(api_key, PROMPT.format(
+            now=now_phx.strftime("%A, %B %d, %Y at %I:%M %p"),
+            transcript=(transcript or "(no earlier messages)")[:9000],
+            renter_text=(renter_text or "")[:3000],
+        ), SCHEMA, 1536)
     except Exception as e:  # noqa: BLE001
         log.error("Haiku classify failed, falling back to regex: %s", e)
         return None
@@ -228,21 +236,11 @@ def review_reply(transcript: str, outgoing_body: str, template: str) -> dict:
     if not api_key:
         return {"verdict": "send", "reason": "review-unavailable"}
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key, timeout=10.0, max_retries=1)
-        resp = client.messages.create(
-            model=MODEL,
-            max_tokens=256,
-            output_config={"format": {"type": "json_schema",
-                                      "schema": REVIEW_SCHEMA}},
-            messages=[{"role": "user", "content": REVIEW_PROMPT.format(
-                transcript=(transcript or "(none)")[:9000],
-                template=template or "unknown",
-                outgoing=(outgoing_body or "")[:4000],
-            )}],
-        )
-        text = next((b.text for b in resp.content if b.type == "text"), "")
-        out = json.loads(text)
+        out = _json_call(api_key, REVIEW_PROMPT.format(
+            transcript=(transcript or "(none)")[:9000],
+            template=template or "unknown",
+            outgoing=(outgoing_body or "")[:4000],
+        ), REVIEW_SCHEMA, 256)
         if out.get("verdict") not in ("send", "block"):
             return {"verdict": "send", "reason": "review-malformed"}
         return out
