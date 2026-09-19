@@ -384,10 +384,6 @@ def get_facts(addr_slug: str) -> str | None:
         return None
 
 
-def get_standing_rules() -> str | None:
-    return get_facts("_standing_rules")
-
-
 # ------------------------------------------- application attribution (2026-09-17)
 # Alex: "i rented all those houses, not jace". The `agent` field only says who
 # opened the door for a showing. These fields say who took the application and
