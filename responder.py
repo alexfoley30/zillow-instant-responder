@@ -189,6 +189,39 @@ def _escalate_review_block(thread_id: str, reason: str, template: str):
                 urgent=True)
 
 
+def _reserve_or_skip(thread_id: str, stage_key: str, meta: dict,
+                     trigger_message_id: str) -> str | None:
+    """Win the Firestore create-once send lock, or say why we must not send.
+
+    Returns None when this process owns the lock and the caller may go on to
+    build and send; otherwise the 'skipped:<why>' string the caller returns
+    as-is. A 'recover' verdict is genuine ambiguity (a previous attempt
+    reserved and never reported), so it resolves against the source of truth,
+    the thread itself: if Alex already replied by hand, backfill the ledger
+    and stand down rather than send on top of him.
+
+    Every send path goes through this. It used to be inlined in each of the
+    four, and the copies had drifted: the three booking paths returned
+    'skipped:recovered' and stamped recovered='backfilled' where send_stage
+    returned 'skipped:recovered-already-sent' and stamped
+    'backfilled-from-gmail', so the same event read two different ways in the
+    ledger depending on which path reached it. send_stage's wording wins.
+    """
+    verdict = ledger.reserve_send(thread_id, stage_key, meta)
+    if verdict in ("already-sent", "in-flight"):
+        log.info("send lock skip (%s): %s %s", verdict, thread_id, stage_key)
+        return f"skipped:{verdict}"
+    if verdict == "recover":
+        msgs = gm.fetch_thread(thread_id)
+        if gm.alex_replied_after(msgs, trigger_message_id):
+            ledger.mark_sent(thread_id, stage_key,
+                             recovered="backfilled-from-gmail")
+            return "skipped:recovered-already-sent"
+        if not ledger.takeover_send(thread_id, stage_key):
+            return "skipped:takeover-lost"
+    return None
+
+
 def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
                labels_add: list, labels_remove: list, meta: dict,
                trigger_message_id: str = "") -> str:
@@ -210,18 +243,9 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
         log.info("SHADOW %s %s", thread_id, stage_key)
         return "shadowed"
 
-    verdict = ledger.reserve_send(thread_id, stage_key, meta)
-    if verdict in ("already-sent", "in-flight"):
-        log.info("send_stage skip (%s): %s %s", verdict, thread_id, stage_key)
-        return f"skipped:{verdict}"
-    if verdict == "recover":
-        # Ambiguity resolves against the source of truth: the thread itself.
-        msgs = gm.fetch_thread(thread_id)
-        if gm.alex_replied_after(msgs, trigger_message_id):
-            ledger.mark_sent(thread_id, stage_key, recovered="backfilled-from-gmail")
-            return "skipped:recovered-already-sent"
-        if not ledger.takeover_send(thread_id, stage_key):
-            return "skipped:takeover-lost"
+    skip = _reserve_or_skip(thread_id, stage_key, meta, trigger_message_id)
+    if skip:
+        return skip
 
     ok, why = review_gate(thread_id, body, meta.get("template", stage_key))
     if not ok:
@@ -715,16 +739,10 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
         })
         return "shadowed"
 
-    verdict = ledger.reserve_send(thread_id, stage, {"template": "booking_fold"})
-    if verdict in ("already-sent", "in-flight"):
-        return f"skipped:{verdict}"
-    if verdict == "recover":
-        msgs = gm.fetch_thread(thread_id)
-        if gm.alex_replied_after(msgs, message_id):
-            ledger.mark_sent(thread_id, stage, recovered="backfilled")
-            return "skipped:recovered"
-        if not ledger.takeover_send(thread_id, stage):
-            return "skipped:takeover-lost"
+    skip = _reserve_or_skip(thread_id, stage, {"template": "booking_fold"},
+                            message_id)
+    if skip:
+        return skip
 
     body = T.booking_confirmation(first_name, address,
                                   existing["when_human"], agent_name)
@@ -839,18 +857,11 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                 diff_s = abs((near["start_az"] - start_az).total_seconds())
                 stage_probe = f"reply__{message_id}"
                 if diff_s <= 300:
-                    verdict = ledger.reserve_send(
-                        thread_id, stage_probe, {"template": "booking_fold_snap"})
-                    if verdict in ("already-sent", "in-flight"):
-                        return f"skipped:{verdict}"
-                    if verdict == "recover":
-                        msgs2 = gm.fetch_thread(thread_id)
-                        if gm.alex_replied_after(msgs2, message_id):
-                            ledger.mark_sent(thread_id, stage_probe,
-                                             recovered="backfilled")
-                            return "skipped:recovered"
-                        if not ledger.takeover_send(thread_id, stage_probe):
-                            return "skipped:takeover-lost"
+                    skip = _reserve_or_skip(
+                        thread_id, stage_probe,
+                        {"template": "booking_fold_snap"}, message_id)
+                    if skip:
+                        return skip
                     agent_name = cal.agent_name_from_event(near["event"])
                     body = T.booking_confirmation(first_name, address,
                                                   near["when_human"], agent_name)
@@ -926,17 +937,10 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
             return "shadowed"
 
         stage_probe = f"reply__{message_id}"
-        verdict = ledger.reserve_send(thread_id, stage_probe,
-                                      {"template": "booking_new"})
-        if verdict in ("already-sent", "in-flight"):
-            return f"skipped:{verdict}"
-        if verdict == "recover":
-            msgs = gm.fetch_thread(thread_id)
-            if gm.alex_replied_after(msgs, message_id):
-                ledger.mark_sent(thread_id, stage_probe, recovered="backfilled")
-                return "skipped:recovered"
-            if not ledger.takeover_send(thread_id, stage_probe):
-                return "skipped:takeover-lost"
+        skip = _reserve_or_skip(thread_id, stage_probe,
+                                {"template": "booking_new"}, message_id)
+        if skip:
+            return skip
 
         body = T.booking_confirmation(first_name, address, when_human,
                                       agent["name"])
