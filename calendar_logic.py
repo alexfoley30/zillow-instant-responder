@@ -89,6 +89,12 @@ def fmt_showing_time(start_az: datetime) -> str:
     return f"{day}, at {start_az.strftime('%-I:%M %p')}"
 
 
+def short_when(start_az: datetime) -> str:
+    """'Mon 9/22 6:30 PM' - the compact stamp the Alex-facing Poke texts use,
+    the short counterpart to fmt_showing_time's renter-facing long form."""
+    return start_az.strftime("%a %-m/%-d %-I:%M %p")
+
+
 def find_existing_showings(address: str, events: list = None,
                            min_lead_hours: float = 2.0, limit: int = 2) -> list:
     """CONSOLIDATE FIRST: all upcoming showings at THIS house (same street
@@ -376,7 +382,7 @@ def create_showing_event(address: str, first_name: str, start_az: datetime,
     attendees = {rules.ALEX["email"], agent["email"], rules.BRIANNA_VIEWER}
     res = composio_execute("GOOGLECALENDAR_CREATE_EVENT", {
         "calendar_id": "primary",
-        "summary": f"Showing — {address.split(',')[0].strip()} with {first_name}",
+        "summary": f"Showing — {rules.street_line(address)} with {first_name}",
         "location": address,
         "description": (f"Zillow inquiry.\nInquirers: {first_name}.\n"
                         f"Agent: {agent['name']} ({agent['email']})."),
