@@ -83,7 +83,16 @@ Return:
 If the newest message mixes intents (question + time), pick the intent that drives scheduling and still fill question_text."""
 
 
-def _api_call(renter_text: str, transcript: str, now_phx: datetime) -> dict | None:
+def _have_key() -> bool:
+    return bool(os.environ.get("ANTHROPIC_API_KEY", ""))
+
+
+def _json_call(prompt: str, schema: dict, max_tokens: int):
+    """One structured Haiku call: the key check, the client, the schema-bound
+    request and the JSON parse, in one place. Returns the parsed object, or
+    None when the key is missing or anything at all goes wrong - every caller
+    has its own conservative fallback and NONE of them may raise into the
+    pipeline."""
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None
@@ -92,19 +101,28 @@ def _api_call(renter_text: str, transcript: str, now_phx: datetime) -> dict | No
         client = anthropic.Anthropic(api_key=api_key, timeout=10.0, max_retries=1)
         resp = client.messages.create(
             model=MODEL,
-            max_tokens=1536,
-            output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
-            messages=[{"role": "user", "content": PROMPT.format(
-                now=now_phx.strftime("%A, %B %d, %Y at %I:%M %p"),
-                transcript=(transcript or "(no earlier messages)")[:9000],
-                renter_text=(renter_text or "")[:3000],
-            )}],
+            max_tokens=max_tokens,
+            output_config={"format": {"type": "json_schema", "schema": schema}},
+            messages=[{"role": "user", "content": prompt}],
         )
         text = next((b.text for b in resp.content if b.type == "text"), "")
         return json.loads(text)
     except Exception as e:  # noqa: BLE001
-        log.error("Haiku classify failed, falling back to regex: %s", e)
+        log.error("Haiku call failed: %s", e)
         return None
+
+
+def _api_call(renter_text: str, transcript: str, now_phx: datetime) -> dict | None:
+    out = _json_call(
+        PROMPT.format(
+            now=now_phx.strftime("%A, %B %d, %Y at %I:%M %p"),
+            transcript=(transcript or "(no earlier messages)")[:9000],
+            renter_text=(renter_text or "")[:3000],
+        ),
+        SCHEMA, 1536)
+    if out is None:
+        log.error("classify unavailable, falling back to regex")
+    return out
 
 
 # ---------------------------------------------------------------- regex fallback
@@ -224,28 +242,18 @@ def review_reply(transcript: str, outgoing_body: str, template: str) -> dict:
     """Second look before a renter-facing send. FAILS OPEN: any error means
     {"verdict": "send"} - the deterministic guards still stand, and a review
     outage must never stop the pipeline."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return {"verdict": "send", "reason": "review-unavailable"}
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key, timeout=10.0, max_retries=1)
-        resp = client.messages.create(
-            model=MODEL,
-            max_tokens=256,
-            output_config={"format": {"type": "json_schema",
-                                      "schema": REVIEW_SCHEMA}},
-            messages=[{"role": "user", "content": REVIEW_PROMPT.format(
-                transcript=(transcript or "(none)")[:9000],
-                template=template or "unknown",
-                outgoing=(outgoing_body or "")[:4000],
-            )}],
-        )
-        text = next((b.text for b in resp.content if b.type == "text"), "")
-        out = json.loads(text)
-        if out.get("verdict") not in ("send", "block"):
-            return {"verdict": "send", "reason": "review-malformed"}
-        return out
-    except Exception as e:  # noqa: BLE001
-        log.error("review_reply failed (failing open): %s", e)
-        return {"verdict": "send", "reason": "review-error"}
+    out = _json_call(
+        REVIEW_PROMPT.format(
+            transcript=(transcript or "(none)")[:9000],
+            template=template or "unknown",
+            outgoing=(outgoing_body or "")[:4000],
+        ),
+        REVIEW_SCHEMA, 256)
+    if out is None:
+        # Keep the two failure modes apart: no key configured at all vs. a call
+        # that tried and failed. Both fail open; only the second is an alert.
+        return {"verdict": "send",
+                "reason": "review-unavailable" if not _have_key() else "review-error"}
+    if out.get("verdict") not in ("send", "block"):
+        return {"verdict": "send", "reason": "review-malformed"}
+    return out
