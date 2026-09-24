@@ -610,11 +610,18 @@ def _snap_harness(monkeypatch, doc, propose_hhmm):
     monkeypatch.setattr(responder, "review_gate", lambda t, b, k: (True, ""))
     monkeypatch.setattr(responder, "needs_human",
                         lambda *a, **k: calls.setdefault("nh", []).append(a))
-    monkeypatch.setattr(
-        responder, "send_stage",
-        lambda tid, stage, relay, body, add, rm, meta, mid=None:
-            calls["send_stage"].append((stage, meta.get("template"), body))
-            or "sent")
+    def _send_stage(tid, stage, relay, body, add, rm, meta, mid=None,
+                    before_send=None):
+        """Faithful double: the real send_stage runs before_send (the calendar
+        write) between the review gate and the send, so the double must too or
+        a booking test would pass without ever touching the calendar."""
+        calls["send_stage"].append((stage, meta.get("template"), body))
+        if before_send is not None:
+            before_send()
+        calls["replies"].append(body)
+        return "sent"
+
+    monkeypatch.setattr(responder, "send_stage", _send_stage)
     monkeypatch.setattr(responder.ledger, "reserve_send",
                         lambda t, s, m: "acquired")
     monkeypatch.setattr(responder.ledger, "mark_sent", lambda *a, **k: None)
@@ -764,3 +771,141 @@ def test_recover_stuck_still_backfills_open_threads(monkeypatch):
     monkeypatch.setattr(cron.ledger, "mark_sent", lambda tid, stage, **kw: sent.append((tid, kw)))
     cron._recover_stuck()
     assert sent == [("tB", {"recovered": "cron-backfill"})]
+
+
+# ---------------------------------------------------------------- 2026-09-24
+# The lock-and-send pipeline had been written out four times (send_stage plus
+# three bookers). The bookers all drifted: none recorded last_reply_template,
+# one reported a fold failure as "skipped:book-failed" (a code the strand
+# exemption in ledger._thread_send_failed_since does not recognise), and the
+# snap booker wrote its ledger transition before its labels while the other
+# two wrote it after. They now share send_stage via before_send, so these pin
+# what before_send must do inside the real send_stage.
+
+def _send_stage_harness(monkeypatch, before_send=None, send_raises=None):
+    seen = {"order": [], "sent": None, "failed": None, "thread": None}
+    monkeypatch.setattr(responder, "dry_run", lambda: False)
+    monkeypatch.setattr(responder.ledger, "reserve_send",
+                        lambda t, s, m: seen["order"].append("reserve") or "acquired")
+    monkeypatch.setattr(responder, "review_gate",
+                        lambda t, b, k: seen["order"].append("review") or (True, ""))
+    monkeypatch.setattr(responder.ledger, "content_hash", lambda b: "h")
+
+    def _reply(t, r, b):
+        seen["order"].append("send")
+        if send_raises:
+            raise RuntimeError(send_raises)
+
+    monkeypatch.setattr(responder.gm, "send_reply", _reply)
+    monkeypatch.setattr(responder.ledger, "mark_sent",
+                        lambda t, s, **kw: seen.__setitem__("sent", kw))
+    monkeypatch.setattr(responder.ledger, "mark_failed",
+                        lambda t, s, why: seen.__setitem__("failed", why))
+    monkeypatch.setattr(responder.ledger, "upsert_thread",
+                        lambda t, **kw: seen.__setitem__("thread", kw))
+    monkeypatch.setattr(responder.gm, "modify_labels",
+                        lambda t, a, r: seen["order"].append("labels"))
+    monkeypatch.setattr(responder.ledger, "set_labels_pending", lambda *a, **k: None)
+
+    def _wrapped():
+        seen["order"].append("calendar")
+        return before_send() if before_send else None
+
+    out = responder.send_stage("t", "reply__m1", "x@convo.zillow.com", "body",
+                              [responder.HANDLED_LABEL], [responder.AWAITING_LABEL],
+                              {"template": "booking_new"}, "m1",
+                              before_send=_wrapped if before_send is not None else None)
+    return out, seen
+
+
+def test_before_send_runs_after_the_review_gate_and_before_the_send(monkeypatch):
+    # The ATOMIC BOOKING TRIPWIRE: lock, then review, then the calendar write,
+    # then the send, then the labels. A confirmation must never name a showing
+    # that does not exist, and the review must never run after the booking.
+    out, seen = _send_stage_harness(monkeypatch, before_send=lambda: {"event_id": "evNEW"})
+    assert out == "sent"
+    assert seen["order"] == ["reserve", "review", "calendar", "send", "labels"]
+    assert seen["sent"] == {"event_id": "evNEW"}
+
+
+def test_before_send_fields_are_stamped_on_the_sent_record(monkeypatch):
+    out, seen = _send_stage_harness(monkeypatch, before_send=lambda: {"event_id": "evC"})
+    assert out == "sent" and seen["sent"]["event_id"] == "evC"
+
+
+def test_plain_send_stage_stamps_nothing_extra_and_skips_the_calendar(monkeypatch):
+    out, seen = _send_stage_harness(monkeypatch)
+    assert out == "sent"
+    assert "calendar" not in seen["order"]
+    assert seen["sent"] == {}
+
+
+def test_every_send_records_last_reply_template(monkeypatch):
+    # The three bookers never did this, so a booked thread kept the offer
+    # template that preceded it and _offer_is_live could still read it as live
+    # (test_offer_is_live_states already expected "booking_new" to show up here).
+    out, seen = _send_stage_harness(monkeypatch, before_send=lambda: {"event_id": "e"})
+    assert out == "sent"
+    assert seen["thread"] == {"last_reply_template": "booking_new"}
+
+
+def test_calendar_failure_aborts_the_send_with_event_failed(monkeypatch):
+    # "skipped:event-failed" is the prefix ledger._thread_send_failed_since
+    # recognises as a real failure; the old fold path returned
+    # "skipped:book-failed", which it does not.
+    def _boom():
+        raise RuntimeError("calendar 500")
+
+    out, seen = _send_stage_harness(monkeypatch, before_send=_boom)
+    assert out == "skipped:event-failed"
+    assert "send" not in seen["order"]
+    assert seen["sent"] is None
+    assert "calendar 500" in seen["failed"]
+
+
+def test_send_failure_after_a_calendar_write_names_the_orphaned_event(monkeypatch):
+    out, seen = _send_stage_harness(monkeypatch,
+                                    before_send=lambda: {"event_id": "evORPHAN"},
+                                    send_raises="gmail down")
+    assert out == "skipped:send-failed-event-created"
+    assert "evORPHAN" in seen["failed"] and "gmail down" in seen["failed"]
+    assert seen["sent"] is None
+
+
+def test_send_failure_with_no_calendar_write_stays_a_plain_send_failure(monkeypatch):
+    out, seen = _send_stage_harness(monkeypatch, send_raises="gmail down")
+    assert out == "skipped:send-failed"
+    assert seen["failed"] == "gmail down"
+
+
+def test_json_call_returns_none_without_a_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert responder.llm._json_call("p", {"type": "object"}, 8) is None
+
+
+def test_review_reply_fails_open_and_keeps_its_two_failure_modes(monkeypatch):
+    # Both wrappers in llm.py now share _json_call; review_reply must still
+    # distinguish "no key configured" from "the call tried and failed".
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    out = responder.llm.review_reply("t", "b", "booking_new")
+    assert out == {"verdict": "send", "reason": "review-unavailable"}
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(responder.llm, "_json_call", lambda *a, **k: None)
+    out = responder.llm.review_reply("t", "b", "booking_new")
+    assert out == {"verdict": "send", "reason": "review-error"}
+
+    monkeypatch.setattr(responder.llm, "_json_call",
+                        lambda *a, **k: {"verdict": "nonsense"})
+    assert responder.llm.review_reply("t", "b", "x")["reason"] == "review-malformed"
+
+    monkeypatch.setattr(responder.llm, "_json_call",
+                        lambda *a, **k: {"verdict": "block", "reason": "wrong time"})
+    assert responder.llm.review_reply("t", "b", "x")["verdict"] == "block"
+
+
+def test_classify_falls_back_to_regex_when_the_model_is_unavailable(monkeypatch):
+    monkeypatch.setattr(responder.llm, "_json_call", lambda *a, **k: None)
+    now = datetime(2026, 9, 24, 10, 0, tzinfo=AZ)
+    out = responder.llm.classify_reply("I can't make it, need to cancel", "", now)
+    assert out["intent"] == "cancellation" and out["_fallback"] is True
