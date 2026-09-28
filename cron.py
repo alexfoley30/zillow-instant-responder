@@ -22,6 +22,7 @@ import gmail_client as gm
 import ledger
 import rules
 import templates as T
+from timeutil import parse_iso_az, to_az
 
 log = logging.getLogger("zillow-instant.cron")
 
@@ -201,14 +202,6 @@ def reminder_due(start_az, now_az, booked_at_az=None):
     return None
 
 
-def _as_az(dt):
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(rules.AZ_TZ)
-
-
 def _showing_reminders():
     """Ask every booked renter whether their tour still works - once the
     evening before, once about two hours out (Alex 2026-08-29: an agent
@@ -267,14 +260,14 @@ def _showing_reminders():
             log.warning("BOOKED thread %s has no showing time (event %s) - "
                         "no reminder possible", thread_id, event_id)
             continue
-        try:
-            start_az = datetime.fromisoformat(raw_start).astimezone(rules.AZ_TZ)
-        except Exception as e:  # noqa: BLE001
-            log.error("bad booked_start_iso on %s (%r): %s", thread_id, raw_start, e)
+        start_az = parse_iso_az(raw_start)
+        if start_az is None:
+            log.error("bad booked_start_iso on %s (%r) - no reminder possible",
+                      thread_id, raw_start)
             continue
 
         which = reminder_due(start_az, now_az,
-                             _as_az(doc.get("last_action_at")))
+                             to_az(doc.get("last_action_at")))
         if not which:
             continue
 

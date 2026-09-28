@@ -35,7 +35,6 @@ import os
 import re
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from zoneinfo import ZoneInfo
 
 import calendar_logic as cal
 import cron
@@ -46,11 +45,11 @@ import llm
 import rules
 import templates as T
 import website_lead
+from timeutil import AZ_TZ, parse_iso
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("zillow-instant")
 
-AZ_TZ = ZoneInfo("America/Phoenix")
 PORT = int(os.environ.get("PORT", "8080"))
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 # Auth for the watchdog's /reprocess endpoint (separate from the Composio
@@ -113,11 +112,11 @@ def _offer_is_live(doc, now_az) -> bool:
     doc = doc or {}
     if doc.get("state") == ledger.OFFERED:
         return True
+    off = parse_iso(doc.get("offered_start_iso"))
     try:
-        off = doc.get("offered_start_iso")
-        if off and datetime.fromisoformat(off) > now_az:
+        if off is not None and off > now_az:
             return True
-    except (ValueError, TypeError):
+    except TypeError:  # naive vs aware - cannot prove the offer is live
         pass
     return doc.get("last_reply_template") in OFFER_TEMPLATES
 
@@ -552,12 +551,14 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
                 # path - agent pick, event creation, urgent same-day ping.
                 pick = None
                 for iso in doc.get("proposed_slots_iso") or []:
+                    c_dt = parse_iso(iso)
+                    if c_dt is None:
+                        continue
                     try:
-                        c_dt = datetime.fromisoformat(iso)
                         if c_dt > now_az:
                             pick = c_dt
                             break
-                    except (ValueError, TypeError):
+                    except TypeError:  # naive vs aware - unusable, skip
                         continue
                 if pick:
                     cls_slot = dict(cls)

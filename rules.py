@@ -7,9 +7,10 @@ gap tiers, away-block detection, same-property matching, agent selection.
 
 import re
 from datetime import datetime, time, timedelta
-from zoneinfo import ZoneInfo
 
-AZ_TZ = ZoneInfo("America/Phoenix")
+# Canonical definition lives in timeutil; re-exported so the many existing
+# `rules.AZ_TZ` references keep working.
+from timeutil import AZ_TZ  # noqa: F401 - re-export
 
 # Showing windows (America/Phoenix). weekday(): Mon=0 .. Sun=6
 SHOWING_WINDOWS = {

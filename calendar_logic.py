@@ -12,22 +12,17 @@ from datetime import datetime, timedelta, timezone
 import ledger
 import rules
 from gmail_client import composio_execute
+from timeutil import AZ_TZ, iso_utc, parse_iso
 
 log = logging.getLogger("zillow-instant.calendar")
-
-AZ_TZ = rules.AZ_TZ
-
-
-def _iso_utc(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def list_events(days: int = 7, time_min: datetime = None) -> list:
     now = time_min or datetime.now(timezone.utc)
     res = composio_execute("GOOGLECALENDAR_EVENTS_LIST", {
         "calendarId": "primary",
-        "timeMin": _iso_utc(now),
-        "timeMax": _iso_utc(now + timedelta(days=days)),
+        "timeMin": iso_utc(now),
+        "timeMax": iso_utc(now + timedelta(days=days)),
         "singleEvents": True,
         "orderBy": "startTime",
         "maxResults": 100,
@@ -45,23 +40,13 @@ def _ev_text(ev: dict) -> str:
 
 
 def _ev_start(ev: dict) -> datetime | None:
-    raw = (ev.get("start") or {}).get("dateTime")
-    if not raw:
-        return None  # all-day events aren't showings
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    # None also covers all-day events, which carry start.date, not dateTime,
+    # and are never showings.
+    return parse_iso((ev.get("start") or {}).get("dateTime"))
 
 
 def _ev_end(ev: dict) -> datetime | None:
-    raw = (ev.get("end") or {}).get("dateTime")
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    return parse_iso((ev.get("end") or {}).get("dateTime"))
 
 
 def _ev_all_day_covers(ev: dict, day) -> bool:
@@ -143,14 +128,10 @@ def slot_acceptable_to_renter(start_az: datetime, declined_iso: list = None,
     if latest_daily and hm > latest_daily:
         return False
     for iso in declined_iso or []:
-        try:
-            d = datetime.fromisoformat(iso)
-            if d.tzinfo is None:
-                d = d.replace(tzinfo=AZ_TZ)
-            if abs((d - start_az).total_seconds()) <= 900:
-                return False
-        except (ValueError, TypeError):
-            continue
+        # A declined slot with no offset came from a renter-facing local time.
+        d = parse_iso(iso, assume_tz=AZ_TZ)
+        if d is not None and abs((d - start_az).total_seconds()) <= 900:
+            return False
     return True
 
 
@@ -313,12 +294,9 @@ def _full_update_fields(ev: dict, description: str) -> dict:
     start_raw = str((ev.get("start") or {}).get("dateTime") or "")
     end_raw = str((ev.get("end") or {}).get("dateTime") or "")
     duration = rules.SHOWING_MINUTES
-    try:
-        s = datetime.fromisoformat(start_raw)
-        e = datetime.fromisoformat(end_raw)
+    s, e = parse_iso(start_raw), parse_iso(end_raw)
+    if s and e:
         duration = max(5, int((e - s).total_seconds() // 60))
-    except (ValueError, TypeError):
-        pass
     fields = {
         "calendar_id": "primary",
         "event_id": ev.get("id", ""),
