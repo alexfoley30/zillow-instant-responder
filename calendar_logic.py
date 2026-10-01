@@ -372,7 +372,6 @@ def _rebuild_description(desc: str, names: list) -> str:
 def create_showing_event(address: str, first_name: str, start_az: datetime,
                          agent: dict) -> str:
     """Create the 30-minute showing event. Returns the event id."""
-    end_az = start_az + timedelta(minutes=rules.SHOWING_MINUTES)
     attendees = {rules.ALEX["email"], agent["email"], rules.BRIANNA_VIEWER}
     res = composio_execute("GOOGLECALENDAR_CREATE_EVENT", {
         "calendar_id": "primary",
