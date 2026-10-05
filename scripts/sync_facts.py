@@ -32,6 +32,7 @@ BLOCKED_ADDRESSES = [
     "26009 S New Town Dr",   # Sun Lakes 85248 - leased 2026-08-28 (McCombs/McCawley)
     "2118 S El Marino",      # Mesa 85202 - lease out for signature 2026-08-31
     "3308 S Mariana Cir",    # Tempe 85282 - lease out 2026-09-02 ($3,249)
+    "1407 W Glenrosa Ave",   # Phoenix 85013 - rented (Alex confirmed 2026-10-05)
 ]
 
 
