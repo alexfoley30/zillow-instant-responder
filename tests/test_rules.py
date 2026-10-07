@@ -162,3 +162,27 @@ def test_closer_regex_matches_courtesy_only():
     for t in ["Ok can we do 2pm", "thanks, does Friday work?",
               "Perfect, see you at 11", "ok I have a question"]:
         assert not R._CLOSER_RE.match(t), t
+
+
+# ---------------------------------------------------- rules_core 3.9 contract
+# scripts/shadow_dump.py has to run on Apple's /usr/bin/python3 (3.9) and
+# imports rules_core directly. Before the split-out it carried a hand-copied
+# version of these primitives that drifted: it still had the substring
+# street-number match and the pre-midnight-fix window check. These two tests
+# stop the sharing arrangement from quietly breaking again.
+
+def test_rules_core_is_the_single_source():
+    import rules_core
+    for name in ("SHOWING_WINDOWS", "MIN_NOTICE_HOURS", "SHOWING_MINUTES",
+                 "in_window", "number_and_core", "matches_address",
+                 "KNOWN_AGENT_NAMES"):
+        assert getattr(rules, name) is getattr(rules_core, name), name
+
+
+def test_rules_core_stays_python39_parseable():
+    """A `X | None` annotation added here raises TypeError at import on 3.9,
+    which is the exact reason the audit script had its own copy."""
+    import ast
+    import rules_core
+    src = open(rules_core.__file__, encoding="utf-8").read()
+    ast.parse(src, feature_version=(3, 9))
