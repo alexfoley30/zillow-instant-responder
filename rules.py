@@ -43,6 +43,18 @@ _AWAY_RE = re.compile(
     r"lodge|resort)", re.IGNORECASE)
 
 
+def street_line(address: str) -> str:
+    """'1641 E Coronado Rd, Phoenix, AZ 85006' -> '1641 E Coronado Rd'.
+
+    The street line is how every human-facing surface names a property (Poke
+    FYIs, escalations, calendar titles) and the stem every property key is
+    derived from. It was open-coded as `address.split(",")[0]` in ten places
+    across three modules, half of them without the .strip() - so a listing
+    written "1641 E Coronado Rd , Phoenix" put a stray space into Alex's
+    texts. One spelling, stripped once."""
+    return (address or "").split(",")[0].strip()
+
+
 def number_and_core(address: str):
     """'3309 E San Remo Ave' -> ('3309', 'san remo'); (None, None) if unparseable."""
     tokens = re.findall(r"[a-z0-9']+", (address or "").lower())
@@ -60,7 +72,7 @@ def _number_present(number: str, haystack: str) -> bool:
 
 def same_property(address: str, haystack: str) -> bool:
     """Same-property-only rule: BOTH street number and street-name core present."""
-    number, core = number_and_core((address or "").split(",")[0])
+    number, core = number_and_core(street_line(address))
     if not number or not core:
         return False
     hay = (haystack or "").lower()
@@ -69,7 +81,7 @@ def same_property(address: str, haystack: str) -> bool:
 
 def addr_slug(address: str) -> str:
     """'1641 E Coronado Rd, Phoenix...' -> '1641-e-coronado-rd' (fact-sheet key)."""
-    street = (address or "").split(",")[0].strip().lower()
+    street = street_line(address).lower()
     return re.sub(r"[^a-z0-9]+", "-", street).strip("-")
 
 
