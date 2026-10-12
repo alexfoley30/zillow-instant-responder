@@ -202,10 +202,14 @@ REVIEW_SCHEMA = {
 
 REVIEW_PROMPT = """You are the final proofreading gate for an automated rental-showing email assistant. Below is the full conversation with a renter, followed by the reply the system is ABOUT TO SEND.
 
+Current date/time in Phoenix, Arizona: {now}. Resolve the renter's relative days against it ("this Wednesday" means the next Wednesday from today). If the reply confirms a day and time the renter proposed themselves, that is a match, not a contradiction.
+
 Block the reply ONLY if it clearly does one of these:
 1. Contradicts something the renter said (offers or confirms a time they said they cannot do, ignores a stated constraint like "only after 6pm", says "see you then" for a slot they declined).
 2. Repeats a previous outgoing message nearly verbatim (the renter already received this exact ask or offer). EXCEPTION: a showing_reminder template is a scheduled reminder about an already-confirmed tour - restating the time, address and who is meeting them is its whole job, so never block it merely for overlapping the booking confirmation. Block a reminder only if the tour it names was cancelled or the renter already said they cannot make it.
 3. Addresses the wrong person or wrong property, or answers a completely different question than the renter asked.
+
+NOT a contradiction (never block for this): a move-in date, move-in window or lease start ("looking to move between October 28th and November 1st", "need a place by the 1st", "lease ends in December") says when the renter wants to LIVE there, not when they can TOUR. Renters tour days or weeks before they move in, so a tour date earlier than their move-in date is normal and correct. Only constraints about when they can visit (days, hours, "after work", "this Wednesday afternoon") count against a tour time. (Added 2026-10-12: a correct Wednesday booking was blocked because the renter's move-in window started two weeks later.)
 
 Anything else sends. Imperfect but harmless replies send. When unsure, send. reason: one short sentence (used in an alert to the property manager when blocked).
 
@@ -220,7 +224,8 @@ Reply about to be sent (template: {template}):
 ---"""
 
 
-def review_reply(transcript: str, outgoing_body: str, template: str) -> dict:
+def review_reply(transcript: str, outgoing_body: str, template: str,
+                 now_phx: datetime = None) -> dict:
     """Second look before a renter-facing send. FAILS OPEN: any error means
     {"verdict": "send"} - the deterministic guards still stand, and a review
     outage must never stop the pipeline."""
@@ -236,6 +241,8 @@ def review_reply(transcript: str, outgoing_body: str, template: str) -> dict:
             output_config={"format": {"type": "json_schema",
                                       "schema": REVIEW_SCHEMA}},
             messages=[{"role": "user", "content": REVIEW_PROMPT.format(
+                now=(now_phx or datetime.utcnow() - timedelta(hours=7)
+                     ).strftime("%A, %B %d, %Y at %I:%M %p"),
                 transcript=(transcript or "(none)")[:9000],
                 template=template or "unknown",
                 outgoing=(outgoing_body or "")[:4000],
