@@ -25,6 +25,34 @@ SHOWING_WINDOWS = {
 MIN_NOTICE_HOURS = 2          # same-day allowed since 2026-07-27
 SHOWING_MINUTES = 30
 
+# ------------------------------------------------- Phoenix time, one place
+# AZ_TZ above is the single source of truth for "what time is it here".
+# Three shapes of it were in flight: this ZoneInfo, a second ZoneInfo in
+# responder, and a hand-rolled utcnow()-7h in llm.review_reply (right wall
+# clock, but tz-NAIVE, so it could not be compared with anything else here).
+# The two display formats were inlined twice each: "%A, %B %d, %Y at %I:%M %p"
+# in both llm prompts, "%a %-m/%-d %-I:%M %p" at both booking pings.
+# NOT folded in: calendar_logic.fmt_showing_time is a different, renter-facing
+# format with today/tomorrow prefixes, and scripts/shadow_dump.py keeps its
+# own fixed-offset copy because it runs on 3.9 and cannot import this module.
+
+
+def az_now() -> datetime:
+    """Current Phoenix time. The only way the pipeline asks for 'now'."""
+    return datetime.now(AZ_TZ)
+
+
+def fmt_long(dt: datetime) -> str:
+    """'Monday, October 12, 2026 at 01:00 PM' - the LLM prompt date line.
+    Load-bearing: tests assert this exact shape inside the review prompt."""
+    return dt.strftime("%A, %B %d, %Y at %I:%M %p")
+
+
+def fmt_compact(dt: datetime) -> str:
+    """'Mon 10/12 1:00 PM' - operator-facing escalations and Poke pings."""
+    return dt.strftime("%a %-m/%-d %-I:%M %p")
+
+
 ALEX = {"name": "Alex Foley", "email": "alex@azfoleyhomes.com"}
 JACE = {"name": "Jace Johnson", "email": "jacejohnson.re@gmail.com"}
 RHETT = {"name": "Rhett Lueck", "email": "rhettlueck@gmail.com"}
