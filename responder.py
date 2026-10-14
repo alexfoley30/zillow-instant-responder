@@ -35,7 +35,6 @@ import os
 import re
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from zoneinfo import ZoneInfo
 
 import calendar_logic as cal
 import cron
@@ -50,7 +49,7 @@ import website_lead
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("zillow-instant")
 
-AZ_TZ = ZoneInfo("America/Phoenix")
+AZ_TZ = rules.AZ_TZ   # one Phoenix tz for the whole pipeline
 PORT = int(os.environ.get("PORT", "8080"))
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 # Auth for the watchdog's /reprocess endpoint (separate from the Composio
@@ -911,7 +910,7 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         if same_day or jace_cover:
             reason = "same-day" if same_day else "Alex booked"
             jace_ping = (f"{agent['name'].split()[0]} assigned: {first_name} at {address.split(',')[0]} "
-                         f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - {reason}. "
+                         f"{rules.fmt_compact(start_az)} - {reason}. "
                          "Conflict? Reply fast.")
 
         if dry_run():
@@ -971,7 +970,7 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         try:
             gm.poke_ping(jace_ping or (
                 f"Booked: {first_name} - {address.split(',')[0]} - "
-                f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} with "
+                f"{rules.fmt_compact(start_az)} with "
                 f"{agent['name'].split()[0]}. [FYI]"))
         except Exception as e:  # noqa: BLE001
             log.error("booked FYI ping failed: %s", e)
