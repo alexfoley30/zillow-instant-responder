@@ -69,13 +69,20 @@ def offer_existing(first_name, address, when_human, ack=False, answer=None):
     )
 
 
+def _meet_line(agent_name):
+    """Who the renter should expect at the door. Shared by the booking
+    confirmation and both showing reminders - the confirmation carried its
+    own inline copy of this until 2026-10-16."""
+    return "I'll meet you there" if agent_name == "Alex Foley" \
+        else f"{agent_name} will meet you there"
+
+
 def booking_confirmation(first_name, address, when_human, agent_name):
     """Template 3 - slot booked (new event or folded into an existing one).
     TRIPWIRE: responder's legacy-thread reconstruction greps "You're all set"
     from sent mail - if that phrase changes here, update route_message's
     reconstruction block too."""
-    meet = "I'll meet you there" if agent_name == "Alex Foley" \
-        else f"{agent_name} will meet you there"
+    meet = _meet_line(agent_name)
     return (
         f"Hi {first_name},\n\n"
         f"You're all set! I've got you booked for {address} at:\n\n"
@@ -301,11 +308,6 @@ def fact_answer(first_name, answer_line):
         f"{answer_line}\n\n"
         f"{SIGNATURE}"
     )
-
-
-def _meet_line(agent_name):
-    return "I'll meet you there" if agent_name == "Alex Foley" \
-        else f"{agent_name} will meet you there"
 
 
 def showing_reminder_day_before(first_name, address, when_human, agent_name):
