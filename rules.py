@@ -43,6 +43,16 @@ _AWAY_RE = re.compile(
     r"lodge|resort)", re.IGNORECASE)
 
 
+def street_line(address: str) -> str:
+    """Street line only: everything before the first comma, trimmed.
+    '1294 E Apricot Ln, Gilbert, AZ 85298' -> '1294 E Apricot Ln'.
+
+    Nine hand-written copies of `address.split(",")[0]` lived across
+    responder.py, calendar_logic.py, ledger.py and this file - some trimming,
+    some not. One definition instead."""
+    return (address or "").split(",")[0].strip()
+
+
 def number_and_core(address: str):
     """'3309 E San Remo Ave' -> ('3309', 'san remo'); (None, None) if unparseable."""
     tokens = re.findall(r"[a-z0-9']+", (address or "").lower())
@@ -60,7 +70,7 @@ def _number_present(number: str, haystack: str) -> bool:
 
 def same_property(address: str, haystack: str) -> bool:
     """Same-property-only rule: BOTH street number and street-name core present."""
-    number, core = number_and_core((address or "").split(",")[0])
+    number, core = number_and_core(street_line(address))
     if not number or not core:
         return False
     hay = (haystack or "").lower()
@@ -69,7 +79,7 @@ def same_property(address: str, haystack: str) -> bool:
 
 def addr_slug(address: str) -> str:
     """'1641 E Coronado Rd, Phoenix...' -> '1641-e-coronado-rd' (fact-sheet key)."""
-    street = (address or "").split(",")[0].strip().lower()
+    street = street_line(address).lower()
     return re.sub(r"[^a-z0-9]+", "-", street).strip("-")
 
 
