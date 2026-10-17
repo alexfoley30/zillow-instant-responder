@@ -189,6 +189,25 @@ def _escalate_review_block(thread_id: str, reason: str, template: str):
                 urgent=True)
 
 
+def flip_labels(thread_id: str, stage_key: str, add: list, remove: list,
+                context: str = "") -> None:
+    """Apply a Gmail label flip, queueing it for the cron retry when Gmail
+    refuses. A label failure NEVER unwinds the send that preceded it: the
+    renter already has the email and the event is already on the calendar, so
+    only the inbox view is stale until _retry_labels drains the queued doc.
+    Collapsed from four copies of this block (2026-10-11): they had drifted
+    into four different log lines, and only the send_stage copy guarded the
+    empty-list no-op."""
+    if not add and not remove:
+        return
+    try:
+        gm.modify_labels(thread_id, add, remove)
+    except Exception as e:  # noqa: BLE001
+        ledger.set_labels_pending(thread_id, stage_key, add, remove)
+        log.error("label failed %s %s%s (queued for retry): %s", thread_id,
+                  stage_key, f" after {context}" if context else "", e)
+
+
 def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
                labels_add: list, labels_remove: list, meta: dict,
                trigger_message_id: str = "") -> str:
@@ -242,12 +261,7 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
     except Exception:  # noqa: BLE001 - bookkeeping only, never blocks
         pass
 
-    try:
-        if labels_add or labels_remove:
-            gm.modify_labels(thread_id, labels_add, labels_remove)
-    except Exception as e:  # noqa: BLE001 - label failure NEVER triggers a resend
-        log.error("label failed %s %s (queued for retry): %s", thread_id, stage_key, e)
-        ledger.set_labels_pending(thread_id, stage_key, labels_add, labels_remove)
+    flip_labels(thread_id, stage_key, labels_add, labels_remove)
 
     return "sent"
 
@@ -277,20 +291,13 @@ def needs_human(thread_id: str, first_name: str, address: str, last_line: str,
         # is written ONLY when at least one channel succeeded (bug-echo
         # 2026-08-27: stamping on double-failure suppressed the retry and
         # the escalation vanished with only Render logs to show for it).
-        delivered = False
-        try:
-            delivered = bool(gm.poke_ping(msg))
-        except Exception as e:  # noqa: BLE001
-            log.error("poke ping failed: %s", e)
-        try:
-            delivered = bool(gm.alert_email(
-                f"{tag}{first_name} - {address.split(',')[0]}",
-                msg + "\n\nSent by the Zillow pipeline (email backup channel; "
-                      "Poke delivery is unreliable). Reply to the renter via "
-                      "the thread in Gmail, or answer this Needs-you in "
-                      "chat.")) or delivered
-        except Exception as e:  # noqa: BLE001
-            log.error("alert email failed: %s", e)
+        delivered = gm.poke_quiet(msg, "escalation")
+        delivered = gm.alert_email_quiet(
+            f"{tag}{first_name} - {address.split(',')[0]}",
+            msg + "\n\nSent by the Zillow pipeline (email backup channel; "
+                  "Poke delivery is unreliable). Reply to the renter via "
+                  "the thread in Gmail, or answer this Needs-you in "
+                  "chat.", "escalation") or delivered
         if delivered:
             ledger.upsert_thread(
                 thread_id, last_needs_human_ping_at=datetime.now(AZ_TZ))
@@ -740,19 +747,13 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
         ledger.mark_failed(thread_id, stage, str(e))
         return "skipped:book-failed"
     ledger.mark_sent(thread_id, stage, event_id=event_id)
-    try:
-        gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
-    except Exception as e:  # noqa: BLE001
-        ledger.set_labels_pending(thread_id, stage, [HANDLED_LABEL], [AWAITING_LABEL])
-        log.error("label failed after fold: %s", e)
+    flip_labels(thread_id, stage, [HANDLED_LABEL], [AWAITING_LABEL], "fold")
     ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
                       booked_start_iso=existing["start_az"].isoformat(),
                       agent=agent_name)
-    try:
-        gm.poke_ping(f"Booked (added to existing showing): {first_name} - "
-                     f"{address.split(',')[0]} - {existing['when_human']}. [FYI]")
-    except Exception as e:  # noqa: BLE001
-        log.error("fold FYI ping failed: %s", e)
+    gm.poke_quiet(f"Booked (added to existing showing): {first_name} - "
+                  f"{address.split(',')[0]} - {existing['when_human']}. [FYI]",
+                  "fold FYI")
     return "sent"
 
 
@@ -874,20 +875,12 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                     ledger.mark_sent(thread_id, stage_probe, event_id=ev_id)
                     ledger.transition(thread_id, ledger.BOOKED, event_id=ev_id,
                                       snap_offered=True)
-                    try:
-                        gm.modify_labels(thread_id, [HANDLED_LABEL],
-                                         [AWAITING_LABEL])
-                    except Exception as e:  # noqa: BLE001
-                        ledger.set_labels_pending(thread_id, stage_probe,
-                                                  [HANDLED_LABEL],
-                                                  [AWAITING_LABEL])
-                        log.error("label failed after snap fold: %s", e)
-                    try:
-                        gm.poke_ping(
-                            f"Booked (joined existing): {first_name} - "
-                            f"{address.split(',')[0]} - {near['when_human']}. [FYI]")
-                    except Exception as e:  # noqa: BLE001
-                        log.error("snap fold FYI ping failed: %s", e)
+                    flip_labels(thread_id, stage_probe, [HANDLED_LABEL],
+                                [AWAITING_LABEL], "snap fold")
+                    gm.poke_quiet(
+                        f"Booked (joined existing): {first_name} - "
+                        f"{address.split(',')[0]} - {near['when_human']}. [FYI]",
+                        "snap fold FYI")
                     return "sent"
                 their_when = cal.fmt_showing_time(start_az)
                 result = send_stage(
@@ -957,24 +950,17 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                                f"event_id={event_id}")
             return "skipped:send-failed-event-created"
         ledger.mark_sent(thread_id, stage_probe, event_id=event_id)
-        try:
-            gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
-        except Exception as e:  # noqa: BLE001
-            ledger.set_labels_pending(thread_id, stage_probe,
-                                      [HANDLED_LABEL], [AWAITING_LABEL])
-            log.error("label failed after booking: %s", e)
+        flip_labels(thread_id, stage_probe, [HANDLED_LABEL],
+                    [AWAITING_LABEL], "booking")
         ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
                           booked_start_iso=start_az.isoformat(), agent=agent["name"])
         # Booked FYI on EVERY booking (Alex 2026-08-23: v2 only pinged cover
         # assignments; regular bookings reached the calendar but never his
         # phone). Cover bookings keep the urgent reply-fast copy.
-        try:
-            gm.poke_ping(jace_ping or (
-                f"Booked: {first_name} - {address.split(',')[0]} - "
-                f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} with "
-                f"{agent['name'].split()[0]}. [FYI]"))
-        except Exception as e:  # noqa: BLE001
-            log.error("booked FYI ping failed: %s", e)
+        gm.poke_quiet(jace_ping or (
+            f"Booked: {first_name} - {address.split(',')[0]} - "
+            f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} with "
+            f"{agent['name'].split()[0]}. [FYI]"), "booked FYI")
         return "sent"
 
     # No candidate survived validation -> counter with nearest valid slots.

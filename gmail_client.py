@@ -462,6 +462,32 @@ def poke_ping(message: str) -> bool:
         return False
 
 
+# ------------------------------------------------- best-effort notification
+
+def poke_quiet(message: str, context: str) -> bool:
+    """poke_ping that cannot raise. Every ping in this pipeline is a notice
+    ABOUT work already done (the email went out, the event is on the calendar),
+    so a ping that blows up must never unwind the caller. `context` names the
+    path for the log line. Returns False on a refused send and on an exception,
+    so callers that track delivery (needs_human) can still tell the two apart
+    from a success."""
+    try:
+        return bool(poke_ping(message))
+    except Exception as e:  # noqa: BLE001
+        log.error("%s ping failed: %s", context, e)
+        return False
+
+
+def alert_email_quiet(subject: str, body: str, context: str) -> bool:
+    """alert_email that cannot raise. Same contract as poke_quiet - the email
+    channel is the backup for an escalation that already happened."""
+    try:
+        return bool(alert_email(subject, body))
+    except Exception as e:  # noqa: BLE001
+        log.error("%s alert email failed: %s", context, e)
+        return False
+
+
 # ---------------------------------------------------------------- webhook payload
 
 def extract_event(payload: dict):
