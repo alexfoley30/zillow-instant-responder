@@ -189,6 +189,33 @@ def _escalate_review_block(thread_id: str, reason: str, template: str):
                 urgent=True)
 
 
+def relabel(thread_id: str, add: list, remove: list, what: str,
+            stage_key: str = "") -> bool:
+    """The ONE way to move Gmail labels. Never raises: a label failure must
+    never undo a send, a calendar write, or a state transition that already
+    happened (that ordering is why all eight call sites wrapped this in their
+    own try/except). `what` only names the path for the log line.
+
+    Pass stage_key on the paths that own a send doc, so a failed move is
+    queued there and cron's _retry_labels picks it up. The escalate-only
+    paths have no send doc to queue against and still drop the move on the
+    floor; that gap is unchanged here, on purpose.
+    """
+    if not (add or remove):
+        return True
+    try:
+        gm.modify_labels(thread_id, add, remove)
+        return True
+    except Exception as e:  # noqa: BLE001 - label failure NEVER triggers a resend
+        if stage_key:
+            ledger.set_labels_pending(thread_id, stage_key, add, remove)
+            log.error("label failed (%s) %s %s (queued for retry): %s",
+                      what, thread_id, stage_key, e)
+        else:
+            log.error("label failed (%s) %s: %s", what, thread_id, e)
+        return False
+
+
 def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
                labels_add: list, labels_remove: list, meta: dict,
                trigger_message_id: str = "") -> str:
@@ -242,12 +269,8 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
     except Exception:  # noqa: BLE001 - bookkeeping only, never blocks
         pass
 
-    try:
-        if labels_add or labels_remove:
-            gm.modify_labels(thread_id, labels_add, labels_remove)
-    except Exception as e:  # noqa: BLE001 - label failure NEVER triggers a resend
-        log.error("label failed %s %s (queued for retry): %s", thread_id, stage_key, e)
-        ledger.set_labels_pending(thread_id, stage_key, labels_add, labels_remove)
+    relabel(thread_id, labels_add, labels_remove, "after send",
+            stage_key=stage_key)
 
     return "sent"
 
@@ -386,10 +409,7 @@ def route_question(thread_id: str, first_name: str, address: str, relay: str,
     # ack meant every unknown question cost the renter two emails (Alex,
     # 8/5: "follow-up slop"). Escalate silently; Alex answers once via Poke
     # (/send-approved) or Gmail, and that one real answer is the whole thread.
-    try:
-        gm.modify_labels(thread_id, [NEEDS_REPLY_LABEL], [])
-    except Exception as e:  # noqa: BLE001
-        log.error("needs-reply label failed: %s", e)
+    relabel(thread_id, [NEEDS_REPLY_LABEL], [], "needs-reply")
     needs_human(thread_id, first_name, address, question_text)
     return "no-send:escalated"
 
@@ -503,10 +523,7 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
         # booking it is a decline ("will only be there 3 mos - thnx"), and the
         # reschedule ask reads tone-deaf - first live send 2026-08-04 (Kathy).
         if not doc.get("event_id") and state != ledger.BOOKED:
-            try:
-                gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
-            except Exception as e:  # noqa: BLE001
-                log.error("decline relabel failed: %s", e)
+            relabel(thread_id, [HANDLED_LABEL], [AWAITING_LABEL], "decline")
             ledger.transition(thread_id, ledger.CLOSED)
             return "no-send:decline"
         return handle_cancellation(thread_id, doc, first_name, relay,
@@ -516,11 +533,8 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
         return "skipped:leased-thread"
 
     if intent == "benign_closer":
-        try:
-            if not dry_run():
-                gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
-        except Exception as e:  # noqa: BLE001
-            log.error("benign relabel failed: %s", e)
+        if not dry_run():
+            relabel(thread_id, [HANDLED_LABEL], [AWAITING_LABEL], "benign")
         return "no-send:benign"
 
     if intent == "negotiation":
@@ -740,11 +754,8 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
         ledger.mark_failed(thread_id, stage, str(e))
         return "skipped:book-failed"
     ledger.mark_sent(thread_id, stage, event_id=event_id)
-    try:
-        gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
-    except Exception as e:  # noqa: BLE001
-        ledger.set_labels_pending(thread_id, stage, [HANDLED_LABEL], [AWAITING_LABEL])
-        log.error("label failed after fold: %s", e)
+    relabel(thread_id, [HANDLED_LABEL], [AWAITING_LABEL], "after fold",
+            stage_key=stage)
     ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
                       booked_start_iso=existing["start_az"].isoformat(),
                       agent=agent_name)
@@ -874,14 +885,8 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                     ledger.mark_sent(thread_id, stage_probe, event_id=ev_id)
                     ledger.transition(thread_id, ledger.BOOKED, event_id=ev_id,
                                       snap_offered=True)
-                    try:
-                        gm.modify_labels(thread_id, [HANDLED_LABEL],
-                                         [AWAITING_LABEL])
-                    except Exception as e:  # noqa: BLE001
-                        ledger.set_labels_pending(thread_id, stage_probe,
-                                                  [HANDLED_LABEL],
-                                                  [AWAITING_LABEL])
-                        log.error("label failed after snap fold: %s", e)
+                    relabel(thread_id, [HANDLED_LABEL], [AWAITING_LABEL],
+                            "after snap fold", stage_key=stage_probe)
                     try:
                         gm.poke_ping(
                             f"Booked (joined existing): {first_name} - "
@@ -957,12 +962,8 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                                f"event_id={event_id}")
             return "skipped:send-failed-event-created"
         ledger.mark_sent(thread_id, stage_probe, event_id=event_id)
-        try:
-            gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
-        except Exception as e:  # noqa: BLE001
-            ledger.set_labels_pending(thread_id, stage_probe,
-                                      [HANDLED_LABEL], [AWAITING_LABEL])
-            log.error("label failed after booking: %s", e)
+        relabel(thread_id, [HANDLED_LABEL], [AWAITING_LABEL],
+                "after booking", stage_key=stage_probe)
         ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
                           booked_start_iso=start_az.isoformat(), agent=agent["name"])
         # Booked FYI on EVERY booking (Alex 2026-08-23: v2 only pinged cover
@@ -1103,10 +1104,7 @@ def handle_alex_owned_reply(thread_id, doc, msgs, renter_text, message_id) -> st
             cal.remove_renter_or_cancel(event_id, doc.get("renter_name") or "")
         except Exception as e:  # noqa: BLE001
             log.error("cancel/remove failed (continuing): %s", e)
-    try:
-        gm.modify_labels(thread_id, [NEEDS_REPLY_LABEL], [HANDLED_LABEL])
-    except Exception as e:  # noqa: BLE001
-        log.error("cancel relabel failed: %s", e)
+    relabel(thread_id, [NEEDS_REPLY_LABEL], [HANDLED_LABEL], "cancel")
     ledger.transition(thread_id, ledger.AWAITING_TIME, event_id=None,
                       booked_start_iso=None)
     needs_human(thread_id, doc.get("renter_name") or "the renter",
