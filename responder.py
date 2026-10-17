@@ -252,6 +252,17 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
     return "sent"
 
 
+def _booked_ping(first_name: str, address: str, when_human: str,
+                 label: str = "Booked", agent_first: str = "") -> str:
+    """The Alex-facing "we booked it" text. Three call sites (fresh booking,
+    fold into an existing showing, snap onto a nearby one) each hand-rolled
+    this same line, so the street line and the separators drifted between
+    them. `label` carries the only part that actually differs."""
+    tail = f" with {agent_first}" if agent_first else ""
+    return (f"{label}: {first_name} - {rules.street_line(address)} - "
+            f"{when_human}{tail}. [FYI]")
+
+
 def needs_human(thread_id: str, first_name: str, address: str, last_line: str,
                 urgent: bool = False):
     """Escalate: state + needs-you Poke. Rate limit is 1/day/thread EXCEPT
@@ -265,7 +276,7 @@ def needs_human(thread_id: str, first_name: str, address: str, last_line: str,
             (datetime.now(AZ_TZ).astimezone(last_ping.tzinfo) - last_ping) < timedelta(days=1)):
         return
     tag = "URGENT same-day: " if urgent else "Needs you: "
-    msg = (f'{tag}{first_name} — {address.split(",")[0]} — '
+    msg = (f'{tag}{first_name} — {rules.street_line(address)} — '
            f'"{(last_line or "")[:80]}". Reply with your answer and I will '
            f'send it to the renter. [zt:{thread_id}]')
     if dry_run():
@@ -284,7 +295,7 @@ def needs_human(thread_id: str, first_name: str, address: str, last_line: str,
             log.error("poke ping failed: %s", e)
         try:
             delivered = bool(gm.alert_email(
-                f"{tag}{first_name} - {address.split(',')[0]}",
+                f"{tag}{first_name} - {rules.street_line(address)}",
                 msg + "\n\nSent by the Zillow pipeline (email backup channel; "
                       "Poke delivery is unreliable). Reply to the renter via "
                       "the thread in Gmail, or answer this Needs-you in "
@@ -749,8 +760,8 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
                       booked_start_iso=existing["start_az"].isoformat(),
                       agent=agent_name)
     try:
-        gm.poke_ping(f"Booked (added to existing showing): {first_name} - "
-                     f"{address.split(',')[0]} - {existing['when_human']}. [FYI]")
+        gm.poke_ping(_booked_ping(first_name, address, existing["when_human"],
+                                  label="Booked (added to existing showing)"))
     except Exception as e:  # noqa: BLE001
         log.error("fold FYI ping failed: %s", e)
     return "sent"
@@ -884,8 +895,8 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                         log.error("label failed after snap fold: %s", e)
                     try:
                         gm.poke_ping(
-                            f"Booked (joined existing): {first_name} - "
-                            f"{address.split(',')[0]} - {near['when_human']}. [FYI]")
+                            _booked_ping(first_name, address, near["when_human"],
+                                         label="Booked (joined existing)"))
                     except Exception as e:  # noqa: BLE001
                         log.error("snap fold FYI ping failed: %s", e)
                     return "sent"
@@ -910,8 +921,9 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         jace_ping = None
         if same_day or jace_cover:
             reason = "same-day" if same_day else "Alex booked"
-            jace_ping = (f"{agent['name'].split()[0]} assigned: {first_name} at {address.split(',')[0]} "
-                         f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - {reason}. "
+            jace_ping = (f"{agent['name'].split()[0]} assigned: {first_name} "
+                         f"at {rules.street_line(address)} "
+                         f"{cal.short_when(start_az)} - {reason}. "
                          "Conflict? Reply fast.")
 
         if dry_run():
@@ -969,10 +981,9 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         # assignments; regular bookings reached the calendar but never his
         # phone). Cover bookings keep the urgent reply-fast copy.
         try:
-            gm.poke_ping(jace_ping or (
-                f"Booked: {first_name} - {address.split(',')[0]} - "
-                f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} with "
-                f"{agent['name'].split()[0]}. [FYI]"))
+            gm.poke_ping(jace_ping or _booked_ping(
+                first_name, address, cal.short_when(start_az),
+                agent_first=agent["name"].split()[0]))
         except Exception as e:  # noqa: BLE001
             log.error("booked FYI ping failed: %s", e)
         return "sent"
