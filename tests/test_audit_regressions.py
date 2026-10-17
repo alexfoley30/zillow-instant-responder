@@ -678,6 +678,103 @@ def test_snap_fires_once_then_renters_time_books(monkeypatch):
 
 
 
+# --------------------------------------------- 2026-10-06 shared booking tail
+# The three booking paths each carried their own copy of claim -> review ->
+# calendar -> send -> record. These lock in the behaviour the copies disagreed
+# on, so a future edit to _finalize_booking cannot quietly reintroduce it.
+
+def test_snap_fold_records_showing_time_and_agent(monkeypatch):
+    """The snap fold used to transition to BOOKED with only event_id, so
+    cron._showing_reminders had to heal the thread out of zillow_showings
+    before either reminder could fire (and skipped it outright when no
+    showing doc existed). Every booking now stamps the time and the agent."""
+    doc = {"last_reply_template": "offer_existing"}
+    out, calls = _snap_harness(monkeypatch, doc, "15:18")
+    assert out == "sent"
+    st, fields = calls["transitions"][0]
+    assert st == responder.ledger.BOOKED
+    assert fields["agent"] == "Rhett Lueck"
+    assert fields["booked_start_iso"].startswith(str(_next_wed()))
+    assert fields["snap_offered"] is True
+
+
+def _accept_harness(monkeypatch, fold_raises=False, send_raises=False):
+    """book_accepted_offer with every side effect recorded, not executed."""
+    calls = {"failed": [], "sent": [], "transitions": [], "replies": []}
+    ev = _chelsea_event()
+    monkeypatch.setattr(responder, "dry_run", lambda: False)
+    monkeypatch.setattr(responder, "_newer_renter_message_exists",
+                        lambda t, m: False)
+    monkeypatch.setattr(responder, "review_gate", lambda t, b, k: (True, ""))
+    monkeypatch.setattr(responder.cal, "find_existing_showings",
+                        lambda addr, **k: [{
+                            "event": ev,
+                            "start_az": datetime.fromisoformat(
+                                ev["start"]["dateTime"]),
+                            "when_human": "Wednesday, at 3:15 PM"}])
+    monkeypatch.setattr(responder.cal, "agent_name_from_event",
+                        lambda e: "Rhett Lueck")
+    monkeypatch.setattr(responder.ledger, "reserve_send",
+                        lambda t, s, m: "acquired")
+    monkeypatch.setattr(responder.ledger, "mark_sent",
+                        lambda t, s, **k: calls["sent"].append((s, k)))
+    monkeypatch.setattr(responder.ledger, "mark_failed",
+                        lambda t, s, why: calls["failed"].append((s, why)))
+    monkeypatch.setattr(responder.ledger, "transition",
+                        lambda t, st, **f: calls["transitions"].append((st, f)))
+    monkeypatch.setattr(responder.gm, "modify_labels", lambda *a, **k: None)
+    monkeypatch.setattr(responder.gm, "poke_ping", lambda m: None)
+
+    def _fold(event, name):
+        if fold_raises:
+            raise RuntimeError("composio fold update evC failed")
+        return "evC"
+
+    def _send(tid, relay, body):
+        if send_raises:
+            raise RuntimeError("gmail 500")
+        calls["replies"].append(body)
+
+    monkeypatch.setattr(responder.cal, "fold_renter_into_event", _fold)
+    monkeypatch.setattr(responder.gm, "send_reply", _send)
+    out = responder.book_accepted_offer(
+        "t1", {"offered_event_id": "evC"}, "Sam",
+        "2118 S El Marino, Mesa, AZ, 85202", "x@convo.zillow.com", "m9")
+    return out, calls
+
+
+def test_accepted_offer_fold_books_and_stamps_the_thread(monkeypatch):
+    out, calls = _accept_harness(monkeypatch)
+    assert out == "sent"
+    assert any("You're all set" in b for b in calls["replies"])
+    st, fields = calls["transitions"][0]
+    assert st == responder.ledger.BOOKED
+    assert fields["event_id"] == "evC" and fields["agent"] == "Rhett Lueck"
+    assert fields["booked_start_iso"].startswith(str(_next_wed()))
+
+
+def test_accepted_offer_calendar_failure_uses_the_recognised_outcome(monkeypatch):
+    """This path used to report 'skipped:book-failed', a string
+    ledger._thread_send_failed_since does not list in failed_prefixes, so a
+    failed fold never earned the strand exemption. It now matches the other
+    two booking paths."""
+    out, calls = _accept_harness(monkeypatch, fold_raises=True)
+    assert out == "skipped:event-failed"
+    assert calls["transitions"] == [] and calls["replies"] == []
+    assert "booking_fold calendar" in calls["failed"][0][1]
+
+
+def test_accepted_offer_send_failure_keeps_the_event_id_trace(monkeypatch):
+    """Fold and send used to share one try block, so a send that failed after
+    a successful fold recorded only the Gmail error - the event id, the one
+    thing a human needs to clean up a half-booked thread, was lost."""
+    out, calls = _accept_harness(monkeypatch, send_raises=True)
+    assert out == "skipped:send-failed-event-created"
+    assert "event_id=evC" in calls["failed"][0][1]
+    assert calls["transitions"] == []
+
+
+
 # ---------------------------------------------------------------- 2026-09-02
 # UNFORGET S10: booking path ignored the blocked list.
 
