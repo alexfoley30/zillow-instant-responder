@@ -1,7 +1,10 @@
 # Zillow Instant Responder
 
-Sub-30-second auto-reply to new Zillow rental inquiries. This is the "instant layer."
-The existing 5-minute sweep stays as the "smart layer" for booking/calendar.
+Sub-30-second auto-reply to new Zillow rental inquiries. It started as just the "instant
+layer" in front of a separate 5-minute sweep, but since the v2 cutover (see the header
+comment in `render.yaml`) this service is the single writer for every renter-facing send:
+the instant ack, booking and calendar replies (`calendar_logic.py`), and the in-process
+maintenance ticker (`cron.py`). Firestore is the ledger.
 
 ## How it works
 
@@ -14,13 +17,26 @@ New Zillow email lands in alex@azfoleyhomes.com
 Renter has a reply in a few seconds, 24/7, independent of Alex's Mac.
 ```
 
-No AI in the hot path = no token cost, no Anthropic key, dirt cheap to run.
-`responder.py` is pure Python standard library — no pip install, no build step.
+The reply copy itself is still template-only, but there is AI in the path now: every
+renter-facing send goes through `review_gate()` in `responder.py`, which calls
+`llm.review_reply()`, and renter replies are classified with `llm.classify_reply()`.
+Both are Claude Haiku micro-calls and both fail open, so a missing `ANTHROPIC_API_KEY`
+degrades to the deterministic guards instead of blocking sends. Set the key in
+production anyway, it is what makes the second look work.
+
+The service is no longer standard-library only: `requirements.txt` pins its four
+dependencies and `render.yaml` builds with `pip install -r requirements.txt`.
 
 ## What's already done (by Claude)
 
-- `responder.py` — the full webhook receiver + reply logic (idempotent, secret-verified)
-- `render.yaml` — one-file deploy config for Render
+- `responder.py` - webhook receiver, HTTP routes, reply/send logic (idempotent, secret-verified)
+- `gmail_client.py` - Composio Gmail calls, payload parsing (`extract_event()`), labels
+- `ledger.py` - Firestore ledger, the single source of truth for thread state
+- `calendar_logic.py`, `rules.py`, `facts.py`, `templates.py` - booking, guardrails, copy
+- `llm.py` - the Haiku micro-calls: `classify_reply()` (with a regex fallback) and the
+  pre-send `review_reply()`. Both fail open.
+- `cron.py` - in-process maintenance ticker (retries, nudges, showing reminders)
+- `render.yaml` - one-file deploy config for Render
 - This runbook
 
 ## What only YOU can do (firm reasons)
@@ -59,23 +75,32 @@ The old key (`ck_7SYX8U2k...`) was pasted into a chat transcript, so treat it as
    - `AWAITING_RENTER_LABEL_ID` = `Label_1717014254813700027`  (zillow/awaiting-renter)
    - `HANDLED_LABEL_ID` = `Label_6932202305849666189`  (zillow/handled)
    - `WEBHOOK_SECRET` = make up a long random string; use the same value in Step 2's header
+
+   `render.yaml` is the current list of what the service reads, and it declares more
+   than the five above (`COMPOSIO_USER_ID`, `NEEDS_REPLY_LABEL_ID`, `ANTHROPIC_API_KEY`,
+   `POKE_ENDPOINT`, `DRY_RUN`, `GOOGLE_APPLICATION_CREDENTIALS`). Check it before you
+   deploy. The Firestore service-account JSON goes in as a Render secret file.
 5. Deploy. Copy the live URL (e.g. `https://zillow-instant-responder.onrender.com`) and
    paste it into the Composio trigger from Step 2.
 
 ### Step 4 — Test
 
-Hit the URL in a browser — you should see `zillow-instant-responder ok` (health check).
+Hit the URL in a browser. The `GET /` health check answers
+`zillow-pipeline ok (dry_run=True)`, where the flag mirrors the `DRY_RUN` env var, so a
+service that has been cut over live reads `dry_run=False`.
 Then send a test Zillow-style inquiry (or wait for a real one) and confirm a reply goes
 out in seconds and the thread gets the `zillow/awaiting-renter` label.
 
 ## Notes / honesty
 
 - The exact Composio v3 execute endpoint path and trigger payload shape can drift with
-  their API version. `responder.py` is defensive about payload shape, but if the first
+  their API version. The parsing is defensive about payload shape, but if the first
   real trigger logs a parse miss, send Claude the logged payload and it'll adjust
-  `extract_event()` in one edit.
-- Once this is live and confirmed, the 5-minute sweep can be slowed to ~10-15 min (it's
-  now just a backstop for booking replies), cutting cost further. Tell Claude when ready.
+  `extract_event()` in one edit. That function lives in `gmail_client.py` now, not in
+  `responder.py`.
+- Booking replies are no longer backstopped by the old 5-minute sweep: this service owns
+  them, and `cron.py` runs its own 20-minute maintenance loop in-process (label retries,
+  stuck sends, stale-lead nudges, showing reminders).
 - If you ever want to avoid the monthly host cost, the alternative is running this on an
   always-on office machine behind a Cloudflare Tunnel — more setup, Mac/office-dependent,
   but $0/mo. Ask Claude if you want that path instead.
