@@ -99,6 +99,26 @@ def test_addr_slug():
     assert rules.addr_slug("1641 E Coronado Rd, Phoenix, AZ 85006") == "1641-e-coronado-rd"
 
 
+# ------------------------------------------------ street_line (2026-10-12)
+# One spelling for the ten open-coded address.split(",")[0] sites.
+
+def test_street_line_drops_city_state_zip():
+    assert (rules.street_line("1641 E Coronado Rd, Phoenix, AZ 85006")
+            == "1641 E Coronado Rd")
+
+
+def test_street_line_strips_stray_space_before_the_comma():
+    # The half of the old call sites that skipped .strip() put this stray
+    # space straight into Alex's Poke texts.
+    assert rules.street_line("1641 E Coronado Rd , Phoenix, AZ") == "1641 E Coronado Rd"
+
+
+def test_street_line_handles_no_comma_and_empty():
+    assert rules.street_line("1641 E Coronado Rd") == "1641 E Coronado Rd"
+    assert rules.street_line("") == ""
+    assert rules.street_line(None) == ""
+
+
 # --------------------------------------- weekday snap (8/22 Adam Friday bug)
 
 def _snap(raw, llm_date, now):
