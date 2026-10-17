@@ -764,3 +764,54 @@ def test_recover_stuck_still_backfills_open_threads(monkeypatch):
     monkeypatch.setattr(cron.ledger, "mark_sent", lambda tid, stage, **kw: sent.append((tid, kw)))
     cron._recover_stuck()
     assert sent == [("tB", {"recovered": "cron-backfill"})]
+
+
+# ---------------------------------------------------------------- send lock
+
+def _reserve_env(monkeypatch, verdict, alex_replied, takeover=True):
+    """Stub the send lock so _reserve_or_skip can be exercised alone."""
+    marks = []
+    monkeypatch.setattr(responder.ledger, "reserve_send", lambda t, s, m: verdict)
+    monkeypatch.setattr(responder.ledger, "mark_sent",
+                        lambda tid, stage, **kw: marks.append((tid, stage, kw)))
+    monkeypatch.setattr(responder.ledger, "takeover_send", lambda t, s: takeover)
+    monkeypatch.setattr(responder.gm, "fetch_thread", lambda t: ["m"])
+    monkeypatch.setattr(responder.gm, "alex_replied_after",
+                        lambda msgs, mid: alex_replied)
+    return marks
+
+
+def test_reserve_or_skip_passes_the_lock_holder_through(monkeypatch):
+    """'acquired' means this process owns the send: return None, mark nothing."""
+    marks = _reserve_env(monkeypatch, "acquired", alex_replied=False)
+    assert responder._reserve_or_skip("t1", "reply__m1", {}, "m1") is None
+    assert marks == []
+
+
+def test_reserve_or_skip_stands_down_when_already_sent(monkeypatch):
+    for verdict in ("already-sent", "in-flight"):
+        marks = _reserve_env(monkeypatch, verdict, alex_replied=False)
+        assert responder._reserve_or_skip("t1", "s", {}, "m1") == f"skipped:{verdict}"
+        assert marks == []
+
+
+def test_recover_backfills_and_stands_down_when_alex_already_replied(monkeypatch):
+    """The drift this consolidation removed: the three booking paths used to
+    return 'skipped:recovered' / recovered='backfilled' while send_stage
+    returned 'skipped:recovered-already-sent' / 'backfilled-from-gmail', so
+    one event read two ways in the ledger. One wording now, everywhere."""
+    marks = _reserve_env(monkeypatch, "recover", alex_replied=True)
+    out = responder._reserve_or_skip("t1", "reply__m1", {}, "m1")
+    assert out == "skipped:recovered-already-sent"
+    assert marks == [("t1", "reply__m1", {"recovered": "backfilled-from-gmail"})]
+
+
+def test_recover_takes_over_when_alex_has_not_replied(monkeypatch):
+    marks = _reserve_env(monkeypatch, "recover", alex_replied=False, takeover=True)
+    assert responder._reserve_or_skip("t1", "s", {}, "m1") is None
+    assert marks == []
+
+
+def test_recover_yields_when_another_worker_wins_the_takeover(monkeypatch):
+    _reserve_env(monkeypatch, "recover", alex_replied=False, takeover=False)
+    assert responder._reserve_or_skip("t1", "s", {}, "m1") == "skipped:takeover-lost"
