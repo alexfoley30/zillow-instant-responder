@@ -15,6 +15,8 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
+from timeutil import parse_iso
+
 log = logging.getLogger("zillow-instant.gmail")
 
 COMPOSIO_BASE = "https://backend.composio.dev/api/v3"
@@ -107,11 +109,11 @@ def msg_time(m: dict):
             secs = ts / 1000 if ts > 1e12 else ts
             return datetime.fromtimestamp(secs, tz=timezone.utc)
         s = str(ts).strip()
-        try:
-            return datetime.fromisoformat(s.replace("Z", "+00:00"))
-        except ValueError:
-            from email.utils import parsedate_to_datetime
-            return parsedate_to_datetime(s)
+        iso = parse_iso(s)
+        if iso is not None:
+            return iso
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(s)
     except (ValueError, TypeError, OSError, OverflowError):
         return None
 
