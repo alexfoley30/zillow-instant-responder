@@ -162,3 +162,57 @@ def test_closer_regex_matches_courtesy_only():
     for t in ["Ok can we do 2pm", "thanks, does Friday work?",
               "Perfect, see you at 11", "ok I have a question"]:
         assert not R._CLOSER_RE.match(t), t
+
+
+# ------------------------------------------ rules_core stays 3.9-importable
+# rules_core.py exists so scripts/shadow_dump.py (Apple Python 3.9, the only
+# interpreter with firebase_admin) can share these helpers instead of keeping
+# a hand-synced copy that drifts. That only works while the file stays free of
+# 3.10+ syntax and of imports that pull in PEP 604 modules.
+
+def test_rules_core_has_no_pep604_annotations():
+    import ast
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "rules_core.py")
+    tree = ast.parse(open(path).read())
+    for node in ast.walk(tree):
+        annotations = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            annotations = [a.annotation for a in node.args.args if a.annotation]
+            if node.returns:
+                annotations.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            annotations = [node.annotation]
+        for ann in annotations:
+            for sub in ast.walk(ann):
+                assert not isinstance(sub, ast.BinOp), (
+                    "rules_core.py must stay Python 3.9-importable for "
+                    "scripts/shadow_dump.py: 'X | None' raises TypeError there")
+
+
+def test_rules_core_imports_stdlib_only():
+    import ast
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "rules_core.py")
+    tree = ast.parse(open(path).read())
+    roots = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            roots.add(node.module.split(".")[0])
+    assert roots <= {"re", "datetime"}, (
+        "rules_core.py must not grow imports: shadow_dump loads it on 3.9 "
+        "without this project's other modules on the path, got %s" % sorted(roots))
+
+
+def test_shadow_dump_no_longer_reimplements_matching():
+    # The copies drifted once (substring number match, missing midnight guard).
+    # A re-added local def here is that regression starting over.
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "scripts", "shadow_dump.py")
+    body = open(path).read()
+    for name in ("number_and_core", "in_window", "addr_matches", "address_matches"):
+        assert ("def %s(" % name) not in body, (
+            "scripts/shadow_dump.py defines %s() again; import it from "
+            "rules_core instead" % name)
