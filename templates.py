@@ -271,18 +271,6 @@ def fair_housing_steer(first_name):
     )
 
 
-def checking_with_owner(first_name):
-    """Property question we can't answer from the fact sheet."""
-    return (
-        f"Hi {first_name},\n\n"
-        "Great question! Let me check on that and get right back to you. In the "
-        "meantime, want to lock in a time to see the place? Here's what's open "
-        "(Phoenix time):\n\n"
-        f"{WINDOWS_BLOCK}\n"
-        f"{SIGNATURE}"
-    )
-
-
 def approved_answer(first_name, body):
     """Alex's own words, approved via Poke - wrapped in greeting + signature
     only. No bot framing, no bolted-on tour pitch."""
