@@ -443,14 +443,9 @@ def test_snap_skips_multi_weekday_raw():
     assert out["time_candidates"][0]["date"] == "2026-08-23"  # untouched
     assert "weekday_snapped" not in out["time_candidates"][0]
 
-
-def test_snap_still_fixes_single_weekday_mismatch():
-    now = datetime(2026, 8, 20, 18, 0, tzinfo=AZ)  # Thursday
-    cls = {"time_candidates": [
-        {"raw": "Friday around 1", "date": "2026-08-22", "time": "13:00"}]}
-    out = rules.snap_weekday_dates(cls, now)
-    assert out["time_candidates"][0]["date"] == "2026-08-21"  # the Friday
-    assert out["time_candidates"][0]["weekday_snapped"] is True
+# The unambiguous single-weekday control for the above lives in
+# tests/test_rules.py::test_snap_fixes_adam_friday_as_saturday (same Thursday,
+# same "Friday" raw, same 2026-08-22 -> 2026-08-21 snap).
 
 
 # ------------------------------------------------- 8. bug-echo 8/27 fixes
