@@ -12,12 +12,18 @@ import os
 import re
 from datetime import datetime, timedelta
 
+import rules
+
 log = logging.getLogger("zillow-instant.llm")
 
 # Dated snapshot pin (2026-08-30): the bare alias auto-follows whatever
 # Anthropic promotes next, and this pipeline's pins are load-bearing (see the
 # 8/24 Render outage). Bump deliberately, with the golden classify cases green.
 MODEL = "claude-haiku-4-5-20251001"
+
+# How the prompts tell the model what time it is. Both calls render the clock
+# the same way; a second spelling here means the two prompts disagree.
+NOW_FMT = "%A, %B %d, %Y at %I:%M %p"
 
 INTENTS = ["accept_offer", "propose_time", "vague_time", "question",
            "negotiation", "modification_request", "cancellation",
@@ -95,7 +101,7 @@ def _api_call(renter_text: str, transcript: str, now_phx: datetime) -> dict | No
             max_tokens=1536,
             output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
             messages=[{"role": "user", "content": PROMPT.format(
-                now=now_phx.strftime("%A, %B %d, %Y at %I:%M %p"),
+                now=now_phx.strftime(NOW_FMT),
                 transcript=(transcript or "(no earlier messages)")[:9000],
                 renter_text=(renter_text or "")[:3000],
             )}],
@@ -241,8 +247,7 @@ def review_reply(transcript: str, outgoing_body: str, template: str,
             output_config={"format": {"type": "json_schema",
                                       "schema": REVIEW_SCHEMA}},
             messages=[{"role": "user", "content": REVIEW_PROMPT.format(
-                now=(now_phx or datetime.utcnow() - timedelta(hours=7)
-                     ).strftime("%A, %B %d, %Y at %I:%M %p"),
+                now=(now_phx or rules.now_az()).strftime(NOW_FMT),
                 transcript=(transcript or "(none)")[:9000],
                 template=template or "unknown",
                 outgoing=(outgoing_body or "")[:4000],

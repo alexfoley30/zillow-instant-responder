@@ -89,6 +89,12 @@ def fmt_showing_time(start_az: datetime) -> str:
     return f"{day}, at {start_az.strftime('%-I:%M %p')}"
 
 
+def fmt_ping_time(start_az: datetime) -> str:
+    """'Wed 7/8 6:30 PM' - the compact form the team's Poke pings use. Short on
+    purpose: these land as a text message, not as renter-facing copy."""
+    return start_az.strftime("%a %-m/%-d %-I:%M %p")
+
+
 def find_existing_showings(address: str, events: list = None,
                            min_lead_hours: float = 2.0, limit: int = 2) -> list:
     """CONSOLIDATE FIRST: all upcoming showings at THIS house (same street
