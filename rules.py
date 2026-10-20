@@ -43,6 +43,13 @@ _AWAY_RE = re.compile(
     r"lodge|resort)", re.IGNORECASE)
 
 
+def now_az() -> datetime:
+    """The current time in Phoenix. The one way to ask: a hand-rolled UTC-7
+    offset drifts from the zone (and from every other caller) the moment
+    anything about it changes, so nothing in this pipeline subtracts hours."""
+    return datetime.now(AZ_TZ)
+
+
 def number_and_core(address: str):
     """'3309 E San Remo Ave' -> ('3309', 'san remo'); (None, None) if unparseable."""
     tokens = re.findall(r"[a-z0-9']+", (address or "").lower())
