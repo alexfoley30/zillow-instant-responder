@@ -93,3 +93,59 @@ def test_live_real_tour_conflict_still_blocks():
         "works?", "I can't do Wednesday at all, Thursday after 2 is best.")
     out = llm.review_reply(transcript, BOOKING_BODY, "booking_new", now_phx=NOW)
     assert out["verdict"] == "block", out
+
+
+# ---------------------------------------------------- shared Haiku transport
+
+def test_phx_stamp_default_comes_from_az_tz():
+    """The prompt stamp defaults through rules.AZ_TZ, not a hand-rolled
+    utcnow()-7h. Both must read the same wall clock, and the stamp must be
+    tz-aware at the source so a zone change lands in one place."""
+    import rules
+    expected = datetime.now(rules.AZ_TZ).strftime("%A, %B %d, %Y at %I:%M %p")
+    assert llm._phx_stamp() == expected
+    assert llm._phx_stamp(NOW) == "Monday, October 12, 2026 at 05:10 AM"
+
+
+def test_review_reply_fails_open_without_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    out = llm.review_reply(ALEXANDRA_TRANSCRIPT, BOOKING_BODY, "booking_new")
+    assert out == {"verdict": "send", "reason": "review-unavailable"}
+
+
+def test_review_reply_fails_open_when_transport_dies(monkeypatch):
+    """_json_call swallows the error and returns None; review_reply must turn
+    that into a send, never a block."""
+    class _Msgs:
+        def create(self, **kw):
+            raise RuntimeError("overloaded")
+
+    class _Client:
+        def __init__(self, **kw):
+            self.messages = _Msgs()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setitem(sys.modules, "anthropic",
+                        types.SimpleNamespace(Anthropic=_Client))
+    out = llm.review_reply(ALEXANDRA_TRANSCRIPT, BOOKING_BODY, "booking_new",
+                           now_phx=NOW)
+    assert out == {"verdict": "send", "reason": "review-error"}
+
+
+def test_classify_falls_back_to_regex_when_transport_dies(monkeypatch):
+    """Same shared transport, different fallback: classify must reach the
+    regex path, not raise."""
+    class _Msgs:
+        def create(self, **kw):
+            raise RuntimeError("overloaded")
+
+    class _Client:
+        def __init__(self, **kw):
+            self.messages = _Msgs()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setitem(sys.modules, "anthropic",
+                        types.SimpleNamespace(Anthropic=_Client))
+    out = llm.classify_reply("yes that works", "", NOW)
+    assert out["_fallback"] is True
+    assert out["intent"] in llm.INTENTS
