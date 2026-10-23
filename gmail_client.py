@@ -11,9 +11,12 @@ import json
 import logging
 import os
 import re
+import ssl
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+
+import certifi
 
 log = logging.getLogger("zillow-instant.gmail")
 
@@ -25,6 +28,10 @@ COMPOSIO_USER_ID = os.environ.get("COMPOSIO_USER_ID", "")
 ALEX_EMAIL = "alex@azfoleyhomes.com"
 
 POKE_ENDPOINT = os.environ.get("POKE_ENDPOINT", "")
+
+# Verify against the pinned certifi bundle, not Render's OS store: we control
+# when certifi updates (2026-10-23: eMudhra compromise, see requirements.txt).
+TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
 def composio_execute(tool_slug: str, arguments: dict) -> dict:
@@ -41,7 +48,7 @@ def composio_execute(tool_slug: str, arguments: dict) -> dict:
         headers={"x-api-key": COMPOSIO_API_KEY, "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=20, context=TLS_CONTEXT) as r:
             res = json.loads(r.read())
         # Composio's calendar validator is mid-rollout (2026-08-28..30): some
         # instances take the documented string enum for send_updates, others
@@ -63,7 +70,7 @@ def composio_execute(tool_slug: str, arguments: dict) -> dict:
                 headers={"x-api-key": COMPOSIO_API_KEY,
                          "Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req2, timeout=20) as r2:
+            with urllib.request.urlopen(req2, timeout=20, context=TLS_CONTEXT) as r2:
                 return json.loads(r2.read())
         return res
     except urllib.error.HTTPError as e:
@@ -442,7 +449,7 @@ def poke_ping(message: str) -> bool:
                 method="POST",
                 headers={"Content-Type": "application/json",
                          "Authorization": f"Bearer {POKE_API_KEY}"})
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=10, context=TLS_CONTEXT) as r:
                 r.read()
                 return True
         except Exception as e:  # noqa: BLE001
@@ -455,7 +462,7 @@ def poke_ping(message: str) -> bool:
             POKE_ENDPOINT,
             data=json.dumps({"message": message}).encode(),
             method="POST", headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=10, context=TLS_CONTEXT) as r:
             return json.loads(r.read()).get("success", False)
     except Exception as e:  # noqa: BLE001
         log.error("poke_ping failed: %s", e)
