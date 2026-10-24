@@ -33,14 +33,23 @@ def _lead_block(ack, answer):
     return QUESTION_ACK if ack else ""
 
 
-def availability_ask(first_name, address, ack=False, answer=None):
-    """Template 1 - first reply when no showing exists at the house."""
+def availability_ask(first_name, address, ack=False, answer=None, day=None):
+    """Template 1 - first reply when no showing exists at the house. When the
+    renter already named a day (rules.named_day_without_time), ask for a time
+    on THAT day instead of 'what day and time' (Ashley 2026-10-24)."""
+    if day:
+        ask = (f"Thanks for reaching out about {address}! {day} works, I'd love to "
+               f"get you in to see it.\n\n"
+               f"What time on {day} is best for you, and when are you hoping to move? "
+               "Here's when I have open (Phoenix time):\n\n")
+    else:
+        ask = (f"Thanks for reaching out about {address}! I'd love to get you in to see it.\n\n"
+               "When are you hoping to move, and what day and time works to come take a look? "
+               "Here's when I have open this week (Phoenix time):\n\n")
     return (
         f"Hi {first_name},\n\n"
         + _lead_block(ack, answer)
-        + f"Thanks for reaching out about {address}! I'd love to get you in to see it.\n\n"
-        "When are you hoping to move, and what day and time works to come take a look? "
-        "Here's when I have open this week (Phoenix time):\n\n"
+        + ask +
         f"{WINDOWS_BLOCK}\n"
         "Pick a time that works and I'll lock it in for you. Same-day tours are "
         "usually doable too if you give me a couple hours' notice. You can also start an "
