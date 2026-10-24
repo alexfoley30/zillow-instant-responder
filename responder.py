@@ -335,8 +335,12 @@ def handle_new_inquiry(thread_id: str, first_name: str, address: str,
         offered_iso = existing["start_az"].isoformat()
         offered_event = existing["event"].get("id", "")
     else:
-        body = T.availability_ask(first_name, address, ack=ack, answer=answer)
+        day = rules.named_day_without_time(clean)
+        body = T.availability_ask(first_name, address, ack=ack, answer=answer,
+                                  day=day)
         state, template = ledger.ACKED, "availability_ask"
+        if day:
+            template += "+named_day"
         offered_iso, offered_event = None, ""
 
     if answer:
