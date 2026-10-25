@@ -19,6 +19,7 @@ def test_street_key_ignores_city_state_zip_punctuation():
     assert ledger.street_key("1294 E Apricot Ln, Gilbert, AZ 85298") == ledger.street_key("1294 E Apricot Ln, Gilbert, AZ, 85298")
     assert ledger.street_key("1294 E. Apricot Ln.") == "1294eapricotln"
     assert ledger.street_key("") == ""
+    assert ledger.street_key(None) == ""
 
 
 def test_no_substring_matching_on_property_or_name():

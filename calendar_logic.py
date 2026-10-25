@@ -376,7 +376,7 @@ def create_showing_event(address: str, first_name: str, start_az: datetime,
     attendees = {rules.ALEX["email"], agent["email"], rules.BRIANNA_VIEWER}
     res = composio_execute("GOOGLECALENDAR_CREATE_EVENT", {
         "calendar_id": "primary",
-        "summary": f"Showing — {address.split(',')[0].strip()} with {first_name}",
+        "summary": f"Showing — {rules.street_line(address)} with {first_name}",
         "location": address,
         "description": (f"Zillow inquiry.\nInquirers: {first_name}.\n"
                         f"Agent: {agent['name']} ({agent['email']})."),

@@ -71,6 +71,21 @@ def test_before_bound_uses_slot_end():
 
 # ------------------------------------------- address matching (exact keys)
 
+def test_street_line():
+    # The one shape every caller now uses: ping text, email subjects, the
+    # calendar summary, addr_slug and ledger.street_key.
+    assert rules.street_line("1294 E Apricot Ln, Gilbert, AZ 85298") == "1294 E Apricot Ln"
+    assert rules.street_line("  1294 E Apricot Ln  ") == "1294 E Apricot Ln"
+    assert rules.street_line("1294 E Apricot Ln") == "1294 E Apricot Ln"
+    # None-safe: the raw address.split(",")[0] in the ping paths raised here.
+    assert rules.street_line(None) == ""
+    assert rules.street_line("") == ""
+
+
+def test_street_line_feeds_addr_slug():
+    assert rules.addr_slug("1641 E Coronado Rd, Phoenix, AZ 85006") == "1641-e-coronado-rd"
+
+
 def test_number_and_core():
     assert rules.number_and_core("3309 E San Remo Ave") == ("3309", "san remo")
     assert rules.number_and_core("no leading number") == (None, None)
