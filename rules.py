@@ -185,32 +185,23 @@ def away_events(events: list, day_az) -> list:
 
 
 def away_block_status(events_that_day: list) -> str:
-    """'blocked' (whole team away), 'alex-away' (Jace/Rhett not on the event),
-    or 'clear'. Renter never hears why - callers phrase it as 'booked up'."""
-    aways = away_events(events_that_day, None)
-    if not aways:
-        return "clear"
-    for ev in aways:
-        attendees = " ".join(str(a.get("email", "")) for a in ev.get("attendees", []) or [])
-        text = (" ".join([str(ev.get("summary", "")), str(ev.get("description", ""))])
-                + " " + attendees).lower()
-        team_on_event = JACE["email"] in text or RHETT["email"] in text or \
-            "jace" in text or "rhett" in text
-        if team_on_event:
-            return "blocked"
-    return "alex-away"
+    """'blocked' or 'clear'. Alex shows every house himself since 2026-10-25
+    ("make all showings for me moving forward. My team ... aren't renting
+    them out"), so any away event on his calendar blocks the day; there is
+    no team cover any more. Renter never hears why - callers phrase it as
+    'booked up'."""
+    return "blocked" if away_events(events_that_day, None) else "clear"
 
 
 # ---------------------------------------------------------------- agent pick
 
 def pick_agent(start_az: datetime, now_az: datetime, thread_override: str | None = None) -> dict:
-    """Same-day bookings default to RHETT (Alex 2026-08-13, replacing the
-    7/27 Jace default); Alex default for next-day+. A thread-level override
-    ('have Jace cover') beats both."""
+    """ALEX for every showing, same-day included (Alex 2026-10-25: "make all
+    showings for me moving forward", "reply to everyone using only my
+    calendar"; replaces the 8/13 Rhett same-day default). A thread-level
+    override Alex gives by hand ('have Jace cover') still wins."""
     if thread_override and thread_override.lower() in AGENTS:
         return AGENTS[thread_override.lower()]
-    if start_az.date() == now_az.date():
-        return RHETT
     return ALEX
 
 
