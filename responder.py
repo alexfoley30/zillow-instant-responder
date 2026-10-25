@@ -164,6 +164,7 @@ def review_gate(thread_id: str, body: str, template: str,
     repeats an earlier send, or answers the wrong thing. FAILS OPEN - the
     deterministic guards still stand when the review can't run. Returns
     (ok, reason)."""
+    llm.pop_review_provider()  # clear this thread's tag; callers pop it after
     if template == "approved_answer":
         return True, ""  # Alex's own words are never second-guessed
     try:
@@ -224,6 +225,10 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
             return "skipped:takeover-lost"
 
     ok, why = review_gate(thread_id, body, meta.get("template", stage_key))
+    # Who proofread this send: "claude", "fallback:<model>", or None (review
+    # skipped or both AIs down). Recorded on the send doc next to the template
+    # so a reply cleared by the backup AI is visible later.
+    review_provider = llm.pop_review_provider()
     if not ok:
         ledger.mark_failed(thread_id, stage_key, f"review-blocked: {why}")
         _escalate_review_block(thread_id, why, meta.get("template", stage_key))
@@ -236,7 +241,7 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
         log.error("send failed %s %s: %s", thread_id, stage_key, e)
         return "skipped:send-failed"
 
-    ledger.mark_sent(thread_id, stage_key)
+    ledger.mark_sent(thread_id, stage_key, review_provider=review_provider)
     try:
         ledger.upsert_thread(thread_id, last_reply_template=meta.get("template"))
     except Exception:  # noqa: BLE001 - bookkeeping only, never blocks
@@ -497,7 +502,8 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
             log.info("closer override %s: %r was %s", thread_id,
                      renter_text[:40], intent)
             intent = "benign_closer"
-    log.info("reply %s intent=%s%s", thread_id, intent,
+    log.info("reply %s intent=%s via=%s%s", thread_id, intent,
+             cls.get("_provider"),
              " (regex-fallback)" if cls.get("_fallback") else "")
 
     state = doc.get("state", ledger.AWAITING_TIME)
@@ -743,7 +749,8 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
     except Exception as e:  # noqa: BLE001
         ledger.mark_failed(thread_id, stage, str(e))
         return "skipped:book-failed"
-    ledger.mark_sent(thread_id, stage, event_id=event_id)
+    ledger.mark_sent(thread_id, stage, event_id=event_id,
+                     review_provider=llm.pop_review_provider())
     try:
         gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
     except Exception as e:  # noqa: BLE001
@@ -875,7 +882,8 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                         ledger.mark_failed(thread_id, stage_probe,
                                            f"send-after-fold: {e} event_id={ev_id}")
                         return "skipped:send-failed-event-created"
-                    ledger.mark_sent(thread_id, stage_probe, event_id=ev_id)
+                    ledger.mark_sent(thread_id, stage_probe, event_id=ev_id,
+                                     review_provider=llm.pop_review_provider())
                     ledger.transition(thread_id, ledger.BOOKED, event_id=ev_id,
                                       snap_offered=True)
                     try:
@@ -960,7 +968,8 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
             ledger.mark_failed(thread_id, stage_probe, f"send-after-event: {e} "
                                f"event_id={event_id}")
             return "skipped:send-failed-event-created"
-        ledger.mark_sent(thread_id, stage_probe, event_id=event_id)
+        ledger.mark_sent(thread_id, stage_probe, event_id=event_id,
+                         review_provider=llm.pop_review_provider())
         try:
             gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
         except Exception as e:  # noqa: BLE001
