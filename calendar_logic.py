@@ -164,9 +164,9 @@ def validate_slot(start_az: datetime, address: str, events: list,
     Returns {"ok": True, "agent": {...}, "same_day": bool} or
     {"ok": False, "reason": str, "fold": {...}|None}.
 
-    Same-day candidates book with Jace and skip Alex-calendar overlap and
-    drive-time checks (his calendar is not visible); the only blocker is an
-    existing event at the SAME property (fold instead) and the away-block.
+    Every slot books with Alex since 2026-10-25, same-day included, so every
+    slot is checked against his calendar: overlap, drive time, away-block.
+    An existing event at the SAME property is a fold, not a conflict.
     """
     now_az = now_az or datetime.now(AZ_TZ)
     bounds = bounds or {}
@@ -226,34 +226,31 @@ def validate_slot(start_az: datetime, address: str, events: list,
 
     same_day = rules.is_same_day(start_az, now_az)
     agent = rules.pick_agent(start_az, now_az)
-    if status == "alex-away" and agent["email"] == rules.ALEX["email"]:
-        agent = rules.RHETT  # cover default is Rhett (Alex 2026-08-13; was Jace)
 
-    # AGENT FALLBACK (2026-07-30, Kim/New Town): a valid requested time never
-    # bounces because Alex is busy - it books with the cover agent instead
-    # (Rhett since 2026-08-13, was Jace). Counters are
-    # reserved for times that are themselves invalid (window/notice/bounds/
-    # away-block), handled above.
-    jace_cover = None
-    if not same_day and agent["email"] == rules.ALEX["email"]:
-        end_az = start_az + timedelta(minutes=rules.SHOWING_MINUTES)
-        for ev in day_events:
-            s, e = _ev_start(ev), _ev_end(ev)
-            if not s or not e:
-                continue
-            s_az, e_az = s.astimezone(AZ_TZ), e.astimezone(AZ_TZ)
-            if s_az < end_az and start_az < e_az:
-                agent, jace_cover = rules.RHETT, "alex-conflict"
-                break
-            ev_addr = str(ev.get("location", "")) or str(ev.get("summary", ""))
-            if not rules.same_property(address, _ev_text(ev)) and ev_addr.strip():
-                gap = rules.drive_gap_minutes(address, ev_addr)
-                if (s_az >= end_az and (s_az - end_az) < timedelta(minutes=gap)) or \
-                   (e_az <= start_az and (start_az - e_az) < timedelta(minutes=gap)):
-                    agent, jace_cover = rules.RHETT, "drive-gap"
-                    break
+    # ALEX'S CALENDAR ONLY (Alex 2026-10-25: "make all showings for me moving
+    # forward", "reply to everyone using only my calendar"). Before this a
+    # time Alex was busy for booked with the cover agent (Rhett, the 7/30
+    # Kim/New Town rule) and same-day skipped the check entirely. Now a slot
+    # that overlaps his calendar, or leaves no drive time, is simply not free,
+    # same-day included, and the caller counters with times he can make.
+    end_az = start_az + timedelta(minutes=rules.SHOWING_MINUTES)
+    for ev in day_events:
+        s, e = _ev_start(ev), _ev_end(ev)
+        if not s or not e:
+            continue
+        s_az, e_az = s.astimezone(AZ_TZ), e.astimezone(AZ_TZ)
+        if rules.same_property(address, _ev_text(ev)):
+            continue  # he is already at this house; the snap/fold logic handles it
+        if s_az < end_az and start_az < e_az:
+            return {"ok": False, "reason": "alex-busy", "fold": None}
+        ev_addr = str(ev.get("location", "")) or str(ev.get("summary", ""))
+        if not rules.same_property(address, _ev_text(ev)) and ev_addr.strip():
+            gap = rules.drive_gap_minutes(address, ev_addr)
+            if (s_az >= end_az and (s_az - end_az) < timedelta(minutes=gap)) or \
+               (e_az <= start_az and (start_az - e_az) < timedelta(minutes=gap)):
+                return {"ok": False, "reason": "drive-gap", "fold": None}
 
-    return {"ok": True, "agent": agent, "same_day": same_day, "jace_cover": jace_cover}
+    return {"ok": True, "agent": agent, "same_day": same_day, "jace_cover": None}
 
 
 def counter_slots(address: str, events: list, now_az: datetime = None,
