@@ -232,6 +232,28 @@ _WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
              "friday": 4, "saturday": 5, "sunday": 6}
 
 
+_CLOCK_TIME = re.compile(
+    r"\b\d{1,2}(:\d{2})?\s*(a\.?m\.?|p\.?m\.?)(?![a-z])|\b\d{1,2}:\d{2}\b"
+    r"|\bnoon\b|\bat \d{1,2}\b|\baround \d{1,2}\b|\bafter \d{1,2}\b"
+    r"|\bbefore \d{1,2}\b|\bbetween \d{1,2}", re.I)
+
+
+def named_day_without_time(text: str):
+    """The one weekday a first message names when it gives no clock time,
+    e.g. 'I'd love to tour on Monday if there is availability' -> 'Monday'.
+
+    Ashley, 2026-10-24 (1018 E Marigold Ln, thread 1a16eec59561deee): the
+    generic first reply asked 'what day and time works', the pre-send review
+    blocked it for ignoring her Monday, and she sat unanswered. None when no
+    weekday, several weekdays ('Saturday or Sunday'), or a clock time is
+    given - those keep the generic ask."""
+    t = (text or "").lower()
+    named = [name for name in _WEEKDAYS if re.search(rf"\b{name}s?\b", t)]
+    if len(named) != 1 or _CLOCK_TIME.search(t):
+        return None
+    return named[0].capitalize()
+
+
 def snap_weekday_dates(cls: dict, now_az: datetime) -> dict:
     """Deterministic guard on LLM date resolution (Adam, 2026-08-22: renter
     wrote 'Friday around 1-1:30' on a Thursday night; the model resolved it
