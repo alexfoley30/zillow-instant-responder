@@ -23,7 +23,7 @@ def test_same_day_books_alex_not_rhett():
     assert rules.pick_agent(start, NOW) == rules.ALEX
     v = cal.validate_slot(start, ADDR, [], now_az=NOW)
     assert v["ok"] and v["agent"] == rules.ALEX and v["same_day"]
-    assert v["jace_cover"] is None
+    assert "jace_cover" not in v          # no cover agent exists any more
 
 
 def test_next_day_books_alex():

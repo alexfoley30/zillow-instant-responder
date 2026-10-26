@@ -232,7 +232,9 @@ def validate_slot(start_az: datetime, address: str, events: list,
     # time Alex was busy for booked with the cover agent (Rhett, the 7/30
     # Kim/New Town rule) and same-day skipped the check entirely. Now a slot
     # that overlaps his calendar, or leaves no drive time, is simply not free,
-    # same-day included, and the caller counters with times he can make.
+    # same-day included, and the caller counters with times he can make. No
+    # cover assignment can come out of here any more, so there is no
+    # jace_cover on the result.
     end_az = start_az + timedelta(minutes=rules.SHOWING_MINUTES)
     for ev in day_events:
         s, e = _ev_start(ev), _ev_end(ev)
@@ -250,7 +252,7 @@ def validate_slot(start_az: datetime, address: str, events: list,
                (e_az <= start_az and (start_az - e_az) < timedelta(minutes=gap)):
                 return {"ok": False, "reason": "drive-gap", "fold": None}
 
-    return {"ok": True, "agent": agent, "same_day": same_day, "jace_cover": None}
+    return {"ok": True, "agent": agent, "same_day": same_day}
 
 
 def counter_slots(address: str, events: list, now_az: datetime = None,

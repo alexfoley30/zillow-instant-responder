@@ -909,23 +909,22 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                 return result
 
         agent, same_day = v["agent"], v["same_day"]
-        jace_cover = v.get("jace_cover")
         when_human = cal.fmt_showing_time(start_az)
-        jace_ping = None
-        if same_day or jace_cover:
-            reason = "same-day" if same_day else "Alex booked"
-            jace_ping = (f"{agent['name'].split()[0]} assigned: {first_name} at {address.split(',')[0]} "
-                         f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - {reason}. "
-                         "Conflict? Reply fast.")
+        # Same-day bookings keep the urgent reply-fast copy: Alex may be out
+        # with no chance to object before the hour arrives.
+        urgent_ping = None
+        if same_day:
+            urgent_ping = (f"{agent['name'].split()[0]} assigned: {first_name} at {address.split(',')[0]} "
+                           f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - same-day. "
+                           "Conflict? Reply fast.")
 
         if dry_run():
             ledger.write_shadow(thread_id, f"booked__pending_{message_id}", {
                 "would_calendar": {"create": True, "start": start_az.isoformat(),
-                                   "agent": agent["name"], "same_day": same_day,
-                                   "jace_cover": jace_cover},
+                                   "agent": agent["name"], "same_day": same_day},
                 "would_body": T.booking_confirmation(first_name, address,
                                                      when_human, agent["name"]),
-                "would_poke": jace_ping,
+                "would_poke": urgent_ping,
             })
             return "shadowed"
 
@@ -971,9 +970,9 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                           booked_start_iso=start_az.isoformat(), agent=agent["name"])
         # Booked FYI on EVERY booking (Alex 2026-08-23: v2 only pinged cover
         # assignments; regular bookings reached the calendar but never his
-        # phone). Cover bookings keep the urgent reply-fast copy.
+        # phone).
         try:
-            gm.poke_ping(jace_ping or (
+            gm.poke_ping(urgent_ping or (
                 f"Booked: {first_name} - {address.split(',')[0]} - "
                 f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} with "
                 f"{agent['name'].split()[0]}. [FYI]"))
