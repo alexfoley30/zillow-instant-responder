@@ -312,6 +312,12 @@ def stale_reserved_docs(older_than_min: int = 30, limit: int = 20):
     return out
 
 
+def mark_stuck_alerted(thread_id: str, stage_key: str):
+    """The stuck-send backstop tells Alex ONCE per send doc (2026-10-26)."""
+    _send_ref(thread_id, stage_key).set(
+        {"stuck_alerted_at": firestore.SERVER_TIMESTAMP}, merge=True)
+
+
 def mark_abandoned(thread_id: str, stage_key: str, reason: str):
     """Terminal state for a failed send that reality has overtaken (thread
     leased/closed, or a human already answered). Never retried, never
