@@ -5,6 +5,12 @@ windows, 2-hour minimum notice, SAME-DAY LADDER (Jace default), drive-time
 gap tiers, away-block detection, same-property matching, agent selection.
 """
 
+# PEP 563: keeps every annotation a string so this module imports cleanly on
+# Python 3.9, which evaluates `str | None` at def time and raises TypeError.
+# scripts/shadow_dump.py runs on Apple 3.9 and imports this module, so the
+# future import is load-bearing, not cosmetic (tests/test_rules.py locks it).
+from __future__ import annotations
+
 import re
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -33,7 +39,8 @@ AGENTS = {"alex": ALEX, "jace": JACE, "rhett": RHETT}
 
 _DIRECTIONALS = {"n", "s", "e", "w", "ne", "nw", "se", "sw",
                  "north", "south", "east", "west"}
-_STREET_TYPES = {"ave", "avenue", "st", "street", "dr", "drive", "rd", "road",
+# Public: scripts/shadow_dump.py also checks parsed first names against it.
+STREET_TYPES = {"ave", "avenue", "st", "street", "dr", "drive", "rd", "road",
                  "ln", "lane", "ct", "court", "blvd", "boulevard", "way",
                  "pl", "place", "cir", "circle", "trl", "trail", "pkwy",
                  "parkway", "loop", "ter", "terrace"}
@@ -48,7 +55,7 @@ def number_and_core(address: str):
     tokens = re.findall(r"[a-z0-9']+", (address or "").lower())
     if not tokens or not tokens[0].isdigit():
         return None, None
-    core = [t for t in tokens[1:] if t not in _DIRECTIONALS and t not in _STREET_TYPES]
+    core = [t for t in tokens[1:] if t not in _DIRECTIONALS and t not in STREET_TYPES]
     return tokens[0], " ".join(core)
 
 

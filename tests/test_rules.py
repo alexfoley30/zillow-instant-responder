@@ -3,6 +3,7 @@ matching. Every named case here is a bug that actually shipped or nearly did.
 
 Run: zillow-venv python -m pytest tests/ -q
 """
+import ast
 import os
 import sys
 from datetime import datetime
@@ -162,3 +163,36 @@ def test_closer_regex_matches_courtesy_only():
     for t in ["Ok can we do 2pm", "thanks, does Friday work?",
               "Perfect, see you at 11", "ok I have a question"]:
         assert not R._CLOSER_RE.match(t), t
+
+
+# ------------------------------- 3.9 importability (shadow_dump depends on it)
+# scripts/shadow_dump.py runs on Apple /usr/bin/python3 (3.9) and imports this
+# module instead of re-typing the window and address rules. It used to carry
+# its own copy, which drifted and reintroduced two fixed bugs (substring
+# street-number match, no midnight-crossing guard). These two tests lock the
+# properties that make the import possible, so the copy never comes back.
+
+def _rules_source():
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "rules.py")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_rules_has_future_annotations():
+    # Without PEP 563 the `str | None` annotations are evaluated at def time
+    # and raise TypeError on 3.9, which is what forced the copy.
+    assert "from __future__ import annotations" in _rules_source()
+
+
+def test_rules_imports_only_stdlib():
+    # An import of ledger/calendar_logic/gmail_client here would drag
+    # firebase_admin and PEP 604 annotations into the 3.9 script.
+    tree = ast.parse(_rules_source())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert imported <= {"__future__", "re", "datetime", "zoneinfo"}, imported
