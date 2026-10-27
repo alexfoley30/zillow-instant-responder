@@ -269,3 +269,45 @@ def snap_weekday_dates(cls: dict, now_az: datetime) -> dict:
         c["date"] = (now_az.date() + _td(days=days_ahead)).isoformat()
         c["weekday_snapped"] = True
     return cls
+
+
+def named_tour_dates(cls: dict, text: str, now_az: datetime) -> list:
+    """The day(s) a vague renter named with no clock time, as dates, so the
+    reply offers real times on THAT day instead of the week's windows.
+
+    Victor, 2026-10-27 (30209 N Yucca Dr, thread 1a17c18a5f6ca383): at
+    11:45pm he wrote "I would like to check it out tomorrow". The reply
+    repeated the week's windows, the pre-send review blocked it for ignoring
+    his day, and he sat unanswered all night. "Tomorrow" written late at
+    night is ambiguous (he may mean the morning that is hours away, or the
+    day after), so after 9pm or before 5am both days are named. At most two
+    dates; none when he gave a clock time or named nothing."""
+    from datetime import date as _date, timedelta as _td
+    if _CLOCK_TIME.search(text or ""):
+        return []
+    dates = []
+    for c in (cls or {}).get("time_candidates") or []:
+        if c.get("time") or not c.get("date"):
+            continue
+        try:
+            d = _date.fromisoformat(c["date"])
+        except (TypeError, ValueError):
+            continue
+        if d >= now_az.date() and d not in dates:
+            dates.append(d)
+    if not dates:
+        day = named_day_without_time(text)
+        low = (text or "").lower()
+        if day:
+            ahead = (_WEEKDAYS[day.lower()] - now_az.weekday()) % 7
+            dates.append(now_az.date() + _td(days=ahead))
+        elif re.search(r"\btomorrow\b", low):
+            dates.append(now_az.date() + _td(days=1))
+        elif re.search(r"\btoday\b|\btonight\b", low):
+            dates.append(now_az.date())
+    if len(dates) == 1 and re.search(r"\btomorrow\b", text or "", re.I):
+        if now_az.hour >= 21:
+            dates.append(dates[0] + _td(days=1))
+        elif now_az.hour < 5 and dates[0] > now_az.date():
+            dates.insert(0, dates[0] - _td(days=1))
+    return sorted(dates)[:2]

@@ -185,7 +185,7 @@ def _escalate_review_block(thread_id: str, reason: str, template: str):
     doc = ledger.get_thread(thread_id) or {}
     needs_human(thread_id, doc.get("renter_name") or "the renter",
                 doc.get("property_address") or "the property",
-                f"outgoing {template} blocked by pre-send review: {reason}",
+                f"my reply was held for a second look, please answer: {reason}",
                 urgent=True)
 
 
@@ -265,8 +265,11 @@ def needs_human(thread_id: str, first_name: str, address: str, last_line: str,
             (datetime.now(AZ_TZ).astimezone(last_ping.tzinfo) - last_ping) < timedelta(days=1)):
         return
     tag = "URGENT same-day: " if urgent else "Needs you: "
-    msg = (f'{tag}{first_name} — {address.split(",")[0]} — '
-           f'"{(last_line or "")[:80]}". Reply with your answer and I will '
+    # Plain English, and a NUDGE first line so Poke relays it word for word
+    # (Victor 2026-10-27: Poke rewrote "outgoing windows_ask blocked" into
+    # "Victor wants to come by ... for the windows", which read like a repair).
+    msg = (f'{tag}Zillow renter {first_name}, {address.split(",")[0]}: '
+           f'"{(last_line or "")[:160]}". Reply with your answer and I will '
            f'send it to the renter. [zt:{thread_id}]')
     if dry_run():
         ledger.write_shadow(thread_id, f"poke__{ledger.content_hash(msg)}",
@@ -279,7 +282,7 @@ def needs_human(thread_id: str, first_name: str, address: str, last_line: str,
         # the escalation vanished with only Render logs to show for it).
         delivered = False
         try:
-            delivered = bool(gm.poke_ping(msg))
+            delivered = bool(gm.poke_ping("NUDGE\n" + msg))
         except Exception as e:  # noqa: BLE001
             log.error("poke ping failed: %s", e)
         try:
@@ -626,7 +629,11 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
             renter_text or "", re.IGNORECASE))
         repeat = (doc or {}).get("last_reply_template") == "windows_ask"
         wants_today = bool(cls.get("wants_same_day"))
-        if flexible or repeat or wants_today:
+        # A renter who named a day gets real times on that day, never the
+        # week's windows (Victor 2026-10-27: "check it out tomorrow" got a
+        # windows-ask, the review blocked it, and he waited all night).
+        named_dates = rules.named_tour_dates(cls, renter_text, now_az)
+        if flexible or repeat or wants_today or named_dates:
             try:
                 events = cal.list_events(3)
             except Exception as e:  # noqa: BLE001
@@ -635,11 +642,16 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
             cand = []
             try:
                 vf = _renter_facts(doc, cls)
-                cand = cal.counter_slots(
-                    address, events, now_az=now_az,
-                    declined_iso=vf["declined_iso"],
-                    earliest_daily=vf["earliest_daily"],
-                    latest_daily=vf["latest_daily"]) if address else []
+                kw = dict(now_az=now_az, declined_iso=vf["declined_iso"],
+                          earliest_daily=vf["earliest_daily"],
+                          latest_daily=vf["latest_daily"])
+                if address and named_dates:
+                    per_day = 1 if len(named_dates) > 1 else 2
+                    for d in named_dates:
+                        cand += cal.counter_slots(address, events, count=per_day,
+                                                  only_dates={d}, **kw)
+                if address and not cand:
+                    cand = cal.counter_slots(address, events, **kw)
             except Exception as e:  # noqa: BLE001
                 log.error("vague counter_slots failed: %s", e)
             if cand:
@@ -760,6 +772,19 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
     return "sent"
 
 
+def _we_offered(doc, start_az) -> bool:
+    """True when start_az is a time we already put in front of this renter
+    (a proposed slot or the standing offer)."""
+    doc = doc or {}
+    for iso in list(doc.get("proposed_slots_iso") or []) + [doc.get("offered_start_iso")]:
+        try:
+            if iso and datetime.fromisoformat(iso) == start_az:
+                return True
+        except (ValueError, TypeError):
+            continue
+    return False
+
+
 def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                        message_id, now_az) -> str:
     # Calendar read failing here used to kill the whole handler AFTER the
@@ -790,6 +815,7 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         # a lost lead.
         already_offered = (doc or {}).get("last_reply_template") in OFFER_TEMPLATES
         facts = _renter_facts(doc, cls)
+        we_offered = _we_offered(doc, start_az)
         v = cal.validate_slot(start_az, address, events,
                               bounds={"after": cand.get("after"),
                                       "before": cand.get("before")},
@@ -798,7 +824,8 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                               declined_iso=facts["declined_iso"],
                               earliest_daily=facts["earliest_daily"],
                               latest_daily=facts["latest_daily"],
-                              enforce_daily_bounds=False)
+                              enforce_daily_bounds=False,
+                              we_offered=we_offered)
         if v.get("fold"):
             existing = v["fold"]
             result = send_stage(
