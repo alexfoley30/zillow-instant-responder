@@ -255,14 +255,18 @@ def validate_slot(start_az: datetime, address: str, events: list,
 
 def counter_slots(address: str, events: list, now_az: datetime = None,
                   count: int = 2, declined_iso: list = None,
-                  earliest_daily: str = None, latest_daily: str = None) -> list:
+                  earliest_daily: str = None, latest_daily: str = None,
+                  only_dates: set = None) -> list:
     """Earliest valid exact slots for Template 4 - same-day first by design.
     Renter facts flow through so counters never propose a time the renter
     already said they can't make (Alec 8/24: countered 1:00/1:30 PM to a
-    renter whose messages all said after 6pm)."""
+    renter whose messages all said after 6pm). only_dates limits the search
+    to the day(s) the renter named (Victor 2026-10-27)."""
     now_az = now_az or datetime.now(AZ_TZ)
 
     def free(dt):
+        if only_dates and dt.date() not in only_dates:
+            return False
         return validate_slot(dt, address, events, now_az=now_az,
                              declined_iso=declined_iso,
                              earliest_daily=earliest_daily,
