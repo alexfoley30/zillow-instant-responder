@@ -287,6 +287,7 @@ def correlate(thread_id, stage_key, data, created, bundle):
         "intent": cls.get("intent"),
         "outcome": msg.get("outcome"),
         "fallback": bool(cls.get("_fallback")),
+        "provider": cls.get("_provider"),
         "processed_at": iso(msg.get("processed_at")),
     }
 
@@ -742,6 +743,9 @@ def render_html(m, args):
                 chips.append("<span class='chip'>first inquiry &mdash; not classified</span>")
             if tr.get("fallback"):
                 chips.append("<span class='chip warn'>AI classifier failed &mdash; regex guess</span>")
+            elif str(tr.get("provider") or "").startswith("fallback:"):
+                chips.append("<span class='chip warn'>read by the backup AI (%s)</span>"
+                             % E(tr["provider"][len("fallback:"):]))
             for bi in ev["body_issues"]:
                 chips.append("<span class='chip bad'>%s</span>" % E(bi))
             if ev["already_live"]:
