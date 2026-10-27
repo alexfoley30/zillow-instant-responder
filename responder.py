@@ -772,6 +772,19 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
     return "sent"
 
 
+def _we_offered(doc, start_az) -> bool:
+    """True when start_az is a time we already put in front of this renter
+    (a proposed slot or the standing offer)."""
+    doc = doc or {}
+    for iso in list(doc.get("proposed_slots_iso") or []) + [doc.get("offered_start_iso")]:
+        try:
+            if iso and datetime.fromisoformat(iso) == start_az:
+                return True
+        except (ValueError, TypeError):
+            continue
+    return False
+
+
 def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                        message_id, now_az) -> str:
     # Calendar read failing here used to kill the whole handler AFTER the
@@ -802,6 +815,7 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         # a lost lead.
         already_offered = (doc or {}).get("last_reply_template") in OFFER_TEMPLATES
         facts = _renter_facts(doc, cls)
+        we_offered = _we_offered(doc, start_az)
         v = cal.validate_slot(start_az, address, events,
                               bounds={"after": cand.get("after"),
                                       "before": cand.get("before")},
@@ -810,7 +824,8 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                               declined_iso=facts["declined_iso"],
                               earliest_daily=facts["earliest_daily"],
                               latest_daily=facts["latest_daily"],
-                              enforce_daily_bounds=False)
+                              enforce_daily_bounds=False,
+                              we_offered=we_offered)
         if v.get("fold"):
             existing = v["fold"]
             result = send_stage(

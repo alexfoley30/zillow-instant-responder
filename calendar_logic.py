@@ -159,7 +159,8 @@ def validate_slot(start_az: datetime, address: str, events: list,
                   ignore_same_house: bool = False,
                   declined_iso: list = None, earliest_daily: str = None,
                   latest_daily: str = None,
-                  enforce_daily_bounds: bool = True) -> dict:
+                  enforce_daily_bounds: bool = True,
+                  we_offered: bool = False) -> dict:
     """Deterministic validation of one candidate slot.
     Returns {"ok": True, "agent": {...}, "same_day": bool} or
     {"ok": False, "reason": str, "fold": {...}|None}.
@@ -173,7 +174,15 @@ def validate_slot(start_az: datetime, address: str, events: list,
 
     if not rules.in_window(start_az):
         return {"ok": False, "reason": "out-of-window", "fold": None}
-    if not rules.min_notice_ok(start_az, now_az):
+    # A time WE offered stays bookable while the renter answers: the 2h
+    # notice is checked when we offer it, and on a yes only a 1h floor
+    # applies (Victor 2026-10-27: we offered 11:00, his "today @11am" was
+    # processed at 9:00:00.017, and 17 ms past the 2h line made us counter
+    # our own offer).
+    if we_offered:
+        if start_az < now_az + timedelta(hours=1):
+            return {"ok": False, "reason": "too-soon", "fold": None}
+    elif not rules.min_notice_ok(start_az, now_az):
         return {"ok": False, "reason": "too-soon", "fold": None}
     if not rules.respects_renter_bounds(start_az, bounds.get("after"), bounds.get("before")):
         return {"ok": False, "reason": "violates-renter-bounds", "fold": None}

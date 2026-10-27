@@ -135,3 +135,34 @@ def test_escalation_reads_in_plain_english(monkeypatch):
     assert pings[0].startswith("NUDGE\nURGENT same-day: Zillow renter Victor, "
                                "30209 N Yucca Dr:")
     assert "windows_ask" not in pings[0] and "windows_ask" not in emails[0]
+
+
+# 2026-10-27 09:00: Victor answered our 11:00 offer with "We can be there
+# today @11am". It was processed at 9:00:00.017, 17 ms past the 2h notice
+# line, so the book path countered our own offer and the review blocked it.
+NINE_AM = datetime(2026, 10, 27, 9, 0, 0, 17000, tzinfo=AZ)
+ELEVEN = datetime(2026, 10, 27, 11, 0, tzinfo=AZ)
+
+
+def test_offered_slot_books_past_the_two_hour_line():
+    v = cal.validate_slot(ELEVEN, ADDRESS, [], now_az=NINE_AM, we_offered=True)
+    assert v["ok"], v
+    v = cal.validate_slot(ELEVEN, ADDRESS, [], now_az=NINE_AM)
+    assert v == {"ok": False, "reason": "too-soon", "fold": None}
+
+
+def test_offered_slot_still_needs_an_hour():
+    ten_fifteen = datetime(2026, 10, 27, 10, 15, tzinfo=AZ)
+    v = cal.validate_slot(ELEVEN, ADDRESS, [], now_az=ten_fifteen,
+                          we_offered=True)
+    assert v["reason"] == "too-soon"
+
+
+def test_we_offered_matches_proposed_slots_only():
+    doc = {"proposed_slots_iso": [ELEVEN.isoformat(),
+                                  datetime(2026, 10, 28, 10, 30,
+                                           tzinfo=AZ).isoformat()]}
+    assert responder._we_offered(doc, ELEVEN)
+    assert not responder._we_offered(doc, datetime(2026, 10, 27, 11, 30,
+                                                   tzinfo=AZ))
+    assert not responder._we_offered({}, ELEVEN)
