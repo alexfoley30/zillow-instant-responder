@@ -390,18 +390,11 @@ def get_facts(addr_slug: str) -> str | None:
         return None
 
 
-def get_standing_rules() -> str | None:
-    return get_facts("_standing_rules")
-
-
 # ------------------------------------------- application attribution (2026-09-17)
 # Alex: "i rented all those houses, not jace". The `agent` field only says who
 # opened the door for a showing. These fields say who took the application and
 # when the lease was signed for THIS renter, and are written only by a person
 # (scripts/application.py), never by the responder.
-
-APPLICATION_FIELDS = ("application_by", "application_at", "application_note",
-                      "application_logged_at", "lease_signed_at")
 
 AGENT_NAMES = {
     "alex": "Alex Foley",
