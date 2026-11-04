@@ -105,3 +105,24 @@ def test_daycare_nearby_is_not_business_ask():
 def test_business_wifi_question_not_fooled():
     # Working from home is not operating a business facility
     assert rule("Is the internet fast enough to work from home?") != "no_business_sublease"
+
+
+# Availability: listed homes are vacant, answer "available now" (Alex 2026-11-04)
+
+def test_move_in_now_sophia():
+    assert rule("Do you have availability for a tour today? when is the "
+                "earliest move in date?") == "move_in_now"
+
+
+def test_move_in_now_variants():
+    for q in ("Is it still available?", "When will the house be available?",
+              "When can we move in?", "What's the available date?",
+              "is this available now?"):
+        assert rule(q) == "move_in_now", q
+
+
+def test_later_move_in_is_not_move_in_now():
+    # Leyna 11/3: asking if a LATER move-in works is a judgment call for Alex
+    assert rule("our move in date wouldn't be until early December. Would that "
+                "work for this current unit at all?") != "move_in_now"
+    assert "Great question" not in facts.ANSWER_LINES["move_in_now"]
