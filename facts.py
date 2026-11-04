@@ -71,7 +71,22 @@ _RULES = [
         r"(neighborhood safe|is it safe|crime|what are the neighbors|"
         r"good schools|school district (good|rating)|kind of people|"
         r"demographic)", re.IGNORECASE)),
+    # availability / earliest move-in: a home listed for rent is vacant "99.9%
+    # of the time", so the answer is always "available now" (Alex 2026-11-04,
+    # Sophia at Marigold: "when is the earliest move in date?"). Leased homes
+    # never get here: the blocked-address guard stops them first. A renter
+    # asking whether a LATER move-in works is not this question.
+    ("move_in_now", re.compile(
+        r"(earliest move|soonest (move|i can|we can)|"
+        r"when (is|will) (it|the (home|house|unit|property)|this) (be )?(available|ready|vacant)|"
+        r"when can (i|we) (move|get in)|"
+        r"(still|currently|now) available|is (it|this|the (home|house|unit|property)) (still )?available|"
+        r"available (date|now|immediately)|move[- ]?in (date )?(available|ready)|"
+        r"when (is|'s) (it|the home|the house) (open|free))", re.IGNORECASE)),
 ]
+
+MOVE_IN_NOW_LINE = ("Yes, the home is available now, so you can move in as soon "
+                    "as you're approved and the lease is signed.")
 
 APPLIANCES_LINE = ("Yes, the refrigerator, washer, and dryer are all included "
                    "with the home.")
@@ -103,6 +118,7 @@ ANSWER_LINES = {
     "virtual_tour": VIRTUAL_TOUR_LINE,
     "fair_housing": ("On your question - I have to stick to details about the "
                      "property itself, but I'm happy to tell you all about the home."),
+    "move_in_now": MOVE_IN_NOW_LINE,
     "apply_first": ("On pricing - the best first step is getting an application "
                     "in; the owner reviews offers from applicants."),
 }

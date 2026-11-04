@@ -381,6 +381,8 @@ def route_question(thread_id: str, first_name: str, address: str, relay: str,
         body = T.fact_answer(first_name, facts.VIRTUAL_TOUR_LINE)
     elif rule == "fair_housing":
         body = T.fair_housing_steer(first_name)
+    elif rule == "move_in_now":
+        body = T.fact_answer(first_name, facts.MOVE_IN_NOW_LINE)
     elif rule == "apply_first":
         return handle_negotiation(thread_id, first_name, relay, message_id)
 
