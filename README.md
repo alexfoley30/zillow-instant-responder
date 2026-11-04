@@ -104,3 +104,42 @@ python3 scripts/application.py scoreboard
 YYYY-MM-DD and stay empty when unknown; nothing is guessed. Credentials: the service-account
 file at `~/.config/boundless/firebase-sa.json` is used when `GOOGLE_APPLICATION_CREDENTIALS`
 is unset. Run it with the BoundlessPipeline `zillow-venv` python.
+
+## Backup AI (added 2026-10-25)
+
+Alex: "do them all as a back up". Claude (Haiku) still reads every renter reply and
+proofreads every outgoing email. If that Claude call errors or times out, the same prompt
+goes to a backup AI over the OpenAI-style chat completions API, so one code path works for
+xAI Grok or OpenAI. The backup's answer has to pass the same JSON schema check; anything
+else is thrown away and the old keyword parser takes over, exactly as before.
+
+It does nothing until all three of these are set in Render (Environment tab):
+
+| Variable | xAI Grok | OpenAI |
+|---|---|---|
+| `FALLBACK_LLM_BASE_URL` | `https://api.x.ai/v1` | `https://api.openai.com/v1` |
+| `FALLBACK_LLM_API_KEY` | key from console.x.ai | key from platform.openai.com |
+| `FALLBACK_LLM_MODEL` | e.g. `grok-4.20-0309-non-reasoning` | e.g. `gpt-6-luna` |
+
+Optional: `FALLBACK_LLM_REASONING_EFFORT` (sent as `reasoning_effort` only when set; leave
+it unset for a Grok non-reasoning model).
+
+What gets recorded:
+- each classification in `zillow_messages/<id>.classification._provider`: `claude`,
+  `fallback:<model>`, or `regex` (the keyword parser)
+- each send in its `zillow_sends` doc as `review_provider`: who proofread it (`claude`,
+  `fallback:<model>`, or empty when the review was skipped or both AIs were down)
+- the Render log line `reply <thread> intent=... via=...`, plus a warning every time the
+  backup answers
+
+When both are down: the reader falls back to the keyword parser (low-confidence, the
+whole-thread renter facts are not overwritten), and the proofread fails open
+(`review-error`), which is the same as before the backup existed.
+
+Check a key end to end before relying on it (makes one real call to the backup only,
+sends nothing):
+
+```bash
+FALLBACK_LLM_BASE_URL=https://api.x.ai/v1 FALLBACK_LLM_MODEL=<model> \
+FALLBACK_LLM_API_KEY=<key> python3 scripts/fallback_check.py
+```

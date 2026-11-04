@@ -4,15 +4,38 @@ The model EXTRACTS, it never DECIDES. Every booking decision runs through the
 deterministic validators in rules.py / calendar_logic.py. On any LLM failure we
 fall back to a conservative regex parse, and past that to NEEDS_HUMAN - the
 pipeline never guesses.
+
+Backup AI (2026-10-25, Alex: "do them all as a back up"): when the Claude call
+errors or times out, the same prompt and the same JSON schema go to a second
+provider over the OpenAI-compatible chat completions API (xAI Grok or OpenAI,
+picked by env vars). Its output must pass the same schema check or it is
+thrown away. With FALLBACK_LLM_API_KEY unset the backup is inert and every
+path behaves exactly as before. Each answer is tagged with the provider that
+wrote it (`_provider` on a classification, `provider` on a review).
 """
 
 import json
 import logging
 import os
 import re
+import ssl
+import threading
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 
+import certifi
+
 log = logging.getLogger("zillow-instant.llm")
+
+# Same trust policy as gmail_client: verify against the pinned certifi bundle,
+# not the OS store (2026-10-23 eMudhra compromise, see requirements.txt).
+TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
+# Provider tags recorded with each answer.
+PROVIDER_CLAUDE = "claude"
+PROVIDER_REGEX = "regex"
+FALLBACK_TIMEOUT_S = 15
 
 # Dated snapshot pin (2026-08-30): the bare alias auto-follows whatever
 # Anthropic promotes next, and this pipeline's pins are load-bearing (see the
@@ -83,10 +106,134 @@ Return:
 If the newest message mixes intents (question + time), pick the intent that drives scheduling and still fill question_text."""
 
 
+# ---------------------------------------------------------------- backup AI
+
+def _fallback_config() -> dict | None:
+    """The backup provider, or None when it is not configured (the default:
+    no key means today's behavior, untouched)."""
+    key = os.environ.get("FALLBACK_LLM_API_KEY", "").strip()
+    if not key:
+        return None
+    base = os.environ.get("FALLBACK_LLM_BASE_URL", "").strip().rstrip("/")
+    model = os.environ.get("FALLBACK_LLM_MODEL", "").strip()
+    if not base or not model:
+        log.error("backup AI has a key but no FALLBACK_LLM_BASE_URL or "
+                  "FALLBACK_LLM_MODEL - backup disabled")
+        return None
+    return {"key": key, "base": base, "model": model,
+            "effort": os.environ.get("FALLBACK_LLM_REASONING_EFFORT", "").strip()}
+
+
+def fallback_provider_tag() -> str | None:
+    cfg = _fallback_config()
+    return f"fallback:{cfg['model']}" if cfg else None
+
+
+_JSON_TYPES = {"string": str, "boolean": bool, "array": list, "object": dict,
+               "null": type(None)}
+
+
+def matches_schema(value, schema: dict) -> bool:
+    """Strict check of `value` against the subset of JSON Schema used by
+    SCHEMA / REVIEW_SCHEMA (type, enum, properties, required,
+    additionalProperties: false, items). Claude's output is held to these
+    schemas by Anthropic's structured outputs; the backup's is held to them
+    here, so a junk answer can never reach the booking logic."""
+    types_ = schema.get("type")
+    if types_ is not None:
+        types_ = types_ if isinstance(types_, list) else [types_]
+        if not any(isinstance(value, _JSON_TYPES[t]) and
+                   not (t != "boolean" and isinstance(value, bool))
+                   for t in types_):
+            return False
+    if "enum" in schema and value not in schema["enum"]:
+        return False
+    if isinstance(value, dict):
+        props = schema.get("properties", {})
+        if any(k not in value for k in schema.get("required", [])):
+            return False
+        if schema.get("additionalProperties") is False and \
+                any(k not in props for k in value):
+            return False
+        return all(matches_schema(value[k], props[k])
+                   for k in value if k in props)
+    if isinstance(value, list) and "items" in schema:
+        return all(matches_schema(v, schema["items"]) for v in value)
+    return True
+
+
+def _fallback_json(prompt: str, schema: dict, schema_name: str,
+                   purpose: str) -> dict | None:
+    """Ask the backup provider. Returns the parsed answer only when it matches
+    `schema`; None on no config, any error, or junk."""
+    cfg = _fallback_config()
+    if cfg is None:
+        return None
+    body = {
+        "model": cfg["model"],
+        "messages": [{"role": "user", "content": prompt}],
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": schema_name, "schema": schema, "strict": True}},
+    }
+    if cfg["effort"]:
+        body["reasoning_effort"] = cfg["effort"]
+    req = urllib.request.Request(
+        f"{cfg['base']}/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {cfg['key']}",
+                 "Content-Type": "application/json"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=FALLBACK_TIMEOUT_S,
+                                    context=TLS_CONTEXT) as r:
+            data = json.loads(r.read().decode())
+        text = data["choices"][0]["message"]["content"] or ""
+        out = json.loads(text)
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read()[:300]
+        except Exception:  # noqa: BLE001
+            detail = b""
+        log.error("backup AI %s HTTP %s (%s): %s", purpose, e.code,
+                  cfg["model"], detail)
+        return None
+    except Exception as e:  # noqa: BLE001
+        log.error("backup AI %s failed (%s): %s", purpose, cfg["model"], e)
+        return None
+    if not matches_schema(out, schema):
+        log.error("backup AI %s returned output outside the schema (%s), "
+                  "discarded", purpose, cfg["model"])
+        return None
+    return out
+
+
+# Which provider wrote the review for the current request thread, so the send
+# ledger can record it next to the template (send_stage pops it right after
+# review_gate; ThreadingHTTPServer gives every request its own thread).
+_review_seen = threading.local()
+
+
+def pop_review_provider() -> str | None:
+    p = getattr(_review_seen, "provider", None)
+    _review_seen.provider = None
+    return p
+
+
+# ---------------------------------------------------------------- classify
+
+def _classify_prompt(renter_text: str, transcript: str, now_phx: datetime) -> str:
+    return PROMPT.format(
+        now=now_phx.strftime("%A, %B %d, %Y at %I:%M %p"),
+        transcript=(transcript or "(no earlier messages)")[:9000],
+        renter_text=(renter_text or "")[:3000],
+    )
+
+
 def _api_call(renter_text: str, transcript: str, now_phx: datetime) -> dict | None:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None
+    prompt = _classify_prompt(renter_text, transcript, now_phx)
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key, timeout=10.0, max_retries=1)
@@ -94,17 +241,21 @@ def _api_call(renter_text: str, transcript: str, now_phx: datetime) -> dict | No
             model=MODEL,
             max_tokens=1536,
             output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
-            messages=[{"role": "user", "content": PROMPT.format(
-                now=now_phx.strftime("%A, %B %d, %Y at %I:%M %p"),
-                transcript=(transcript or "(no earlier messages)")[:9000],
-                renter_text=(renter_text or "")[:3000],
-            )}],
+            messages=[{"role": "user", "content": prompt}],
         )
         text = next((b.text for b in resp.content if b.type == "text"), "")
-        return json.loads(text)
+        out = json.loads(text)
+        out["_provider"] = PROVIDER_CLAUDE
+        return out
     except Exception as e:  # noqa: BLE001
-        log.error("Haiku classify failed, falling back to regex: %s", e)
+        log.error("Haiku classify failed: %s", e)
+    backup = _fallback_json(prompt, SCHEMA, "renter_reply", "classify")
+    if backup is None:
+        log.error("classify: no AI answer, falling back to regex")
         return None
+    backup["_provider"] = fallback_provider_tag()
+    log.warning("classify answered by BACKUP AI (%s)", backup["_provider"])
+    return backup
 
 
 # ---------------------------------------------------------------- regex fallback
@@ -167,7 +318,8 @@ _CONVO_DEFAULTS = {"constraints": [], "earliest_daily": None,
 def classify_reply(renter_text: str, last_alex: str, now_phx: datetime,
                    transcript: str = None) -> dict:
     """Haiku first, regex fallback. Result always matches SCHEMA's shape
-    (plus `_fallback: True` when the regex path produced it). `transcript`
+    (plus `_fallback: True` when the regex path produced it, and
+    `_provider`: "claude", "fallback:<model>" or "regex"). `transcript`
     is the full conversation (2026-08-25: the model reads the WHOLE thread,
     so constraints and declined slots survive across messages); callers
     that pass none get the legacy last-exchange context."""
@@ -177,6 +329,8 @@ def classify_reply(renter_text: str, last_alex: str, now_phx: datetime,
     result = _api_call(renter_text, transcript, now_phx)
     if result is None:
         result = _regex_classify(renter_text, now_phx)
+        result["_provider"] = PROVIDER_REGEX
+    log.info("classify answered by %s", result.get("_provider"))
     result.setdefault("time_candidates", [])
     result.setdefault("wants_same_day", False)
     result.setdefault("question_text", None)
@@ -228,10 +382,29 @@ def review_reply(transcript: str, outgoing_body: str, template: str,
                  now_phx: datetime = None) -> dict:
     """Second look before a renter-facing send. FAILS OPEN: any error means
     {"verdict": "send"} - the deterministic guards still stand, and a review
-    outage must never stop the pipeline."""
+    outage must never stop the pipeline. When Claude errors (or answers
+    outside the schema) the backup AI gets the same prompt; its verdict is
+    used only if it matches REVIEW_SCHEMA. Both down = today's fail-open.
+    The result carries `provider` (who wrote the verdict)."""
+    out = _review(transcript, outgoing_body, template, now_phx)
+    _review_seen.provider = out.get("provider")
+    log.info("review %s answered by %s: %s", template, out.get("provider"),
+             out.get("verdict"))
+    return out
+
+
+def _review(transcript, outgoing_body, template, now_phx) -> dict:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        return {"verdict": "send", "reason": "review-unavailable"}
+        return {"verdict": "send", "reason": "review-unavailable",
+                "provider": None}
+    prompt = REVIEW_PROMPT.format(
+        now=(now_phx or datetime.utcnow() - timedelta(hours=7)
+             ).strftime("%A, %B %d, %Y at %I:%M %p"),
+        transcript=(transcript or "(none)")[:9000],
+        template=template or "unknown",
+        outgoing=(outgoing_body or "")[:4000],
+    )
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key, timeout=10.0, max_retries=1)
@@ -240,19 +413,24 @@ def review_reply(transcript: str, outgoing_body: str, template: str,
             max_tokens=256,
             output_config={"format": {"type": "json_schema",
                                       "schema": REVIEW_SCHEMA}},
-            messages=[{"role": "user", "content": REVIEW_PROMPT.format(
-                now=(now_phx or datetime.utcnow() - timedelta(hours=7)
-                     ).strftime("%A, %B %d, %Y at %I:%M %p"),
-                transcript=(transcript or "(none)")[:9000],
-                template=template or "unknown",
-                outgoing=(outgoing_body or "")[:4000],
-            )}],
+            messages=[{"role": "user", "content": prompt}],
         )
         text = next((b.text for b in resp.content if b.type == "text"), "")
         out = json.loads(text)
-        if out.get("verdict") not in ("send", "block"):
-            return {"verdict": "send", "reason": "review-malformed"}
-        return out
+        if out.get("verdict") in ("send", "block"):
+            out["provider"] = PROVIDER_CLAUDE
+            return out
+        failed = {"verdict": "send", "reason": "review-malformed",
+                  "provider": None}
     except Exception as e:  # noqa: BLE001
-        log.error("review_reply failed (failing open): %s", e)
-        return {"verdict": "send", "reason": "review-error"}
+        log.error("review_reply failed: %s", e)
+        failed = {"verdict": "send", "reason": "review-error", "provider": None}
+    backup = _fallback_json(prompt, REVIEW_SCHEMA, "send_review", "review")
+    if backup is None:
+        log.error("review_reply: no AI answer (failing open, %s)",
+                  failed["reason"])
+        return failed
+    backup["provider"] = fallback_provider_tag()
+    log.warning("review answered by BACKUP AI (%s): %s",
+                backup["provider"], backup["verdict"])
+    return backup
