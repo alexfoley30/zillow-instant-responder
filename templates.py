@@ -128,6 +128,22 @@ def counter_proposal(first_name, slots_human):
     )
 
 
+def counter_existing(first_name, address, their_when_human, when_human):
+    """Consolidate before countering (Alex 2026-11-04, Kylinn/Marigold): the
+    renter's own time can't work, but the house already has a showing that
+    day. Offer it plainly, and keep the door open for another time."""
+    return (
+        f"Hi {first_name},\n\n"
+        "Thanks for getting back to me! The time you asked for "
+        f"({their_when_human}) won't work on my end, but we already have a showing "
+        f"lined up at {address} {when_human} (Arizona time). Can you make that "
+        "one? Just say the word and I'll add you in.\n\n"
+        "If that doesn't fit, send me another day and an exact time and I'll get "
+        "you set up.\n\n"
+        f"{SIGNATURE}"
+    )
+
+
 def offer_existing_reply(first_name, when_human):
     """Reply-stage consolidate-first (added 2026-08-22, Jamie/Redfield):
     renter asked vaguely ("today?", "Saturday?") and the house already has
