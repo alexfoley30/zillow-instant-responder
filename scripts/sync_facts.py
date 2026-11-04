@@ -13,27 +13,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ledger  # noqa: E402
+# Leased/off-market list (was hardcoded in responder.py + SKILL.md, then in
+# Firestore so marking a home leased never needs a redeploy). The list itself
+# lives in addr_rules.LEASED_PROPERTIES - shadow_dump audits against the same
+# one instead of its own stale copy of it.
+from addr_rules import BLOCKED_ADDRESSES  # noqa: E402
 
 FACTS_DIR = os.path.expanduser(
     "~/Desktop/Boundless Real Estate - AI/property-facts")
-
-# Leased/off-market list (was hardcoded in responder.py + SKILL.md - now lives
-# in Firestore so marking a home leased never needs a redeploy).
-BLOCKED_ADDRESSES = [
-    "3309 E San Remo Ave",   # Gilbert 85234 - leased 2026-07-04
-    "8743 E Palo Verde Dr",  # Scottsdale 85250 - leased 2026-07-08
-    "22500 N Greenland Park Dr",  # Maricopa 85139 - leased 2026-08-01
-    "1641 E Coronado Rd",    # Phoenix 85006 - leased 2026-08-01
-    "1294 E Apricot Ln",     # Gilbert 85298 - leased 2026-08-09 ($3,249)
-    "3896 E Alfalfa Dr",     # Gilbert 85298 - leased 2026-08-20 ($3,399)
-    "736 E Gold Dust Way",   # Gilbert - leased (Alex audit 2026-08-22)
-    "300 N Gila Springs Blvd",  # Chandler - leased (Alex audit 2026-08-22)
-    "1110 E Redfield Rd",    # Tempe 85283 - leased 2026-08-25 ($2,999, Courtney)
-    "26009 S New Town Dr",   # Sun Lakes 85248 - leased 2026-08-28 (McCombs/McCawley)
-    "2118 S El Marino",      # Mesa 85202 - lease out for signature 2026-08-31
-    "3308 S Mariana Cir",    # Tempe 85282 - lease out 2026-09-02 ($3,249)
-    "1407 W Glenrosa Ave",   # Phoenix 85013 - rented (Alex confirmed 2026-10-05)
-]
 
 
 def sha(text: str) -> str:
