@@ -827,7 +827,8 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                               earliest_daily=facts["earliest_daily"],
                               latest_daily=facts["latest_daily"],
                               enforce_daily_bounds=False,
-                              we_offered=we_offered)
+                              we_offered=we_offered,
+                              allow_cover=True)
         if v.get("fold"):
             existing = v["fold"]
             result = send_stage(
@@ -942,7 +943,7 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         when_human = cal.fmt_showing_time(start_az)
         jace_ping = None
         if same_day or jace_cover:
-            reason = "same-day" if same_day else "Alex booked"
+            reason = ("Alex busy" if jace_cover else "same-day")
             jace_ping = (f"{agent['name'].split()[0]} assigned: {first_name} at {address.split(',')[0]} "
                          f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - {reason}. "
                          "Conflict? Reply fast.")
