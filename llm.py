@@ -211,6 +211,8 @@ Block the reply ONLY if it clearly does one of these:
 
 NOT a contradiction (never block for this): a move-in date, move-in window or lease start ("looking to move between October 28th and November 1st", "need a place by the 1st", "lease ends in December") says when the renter wants to LIVE there, not when they can TOUR. Renters tour days or weeks before they move in, so a tour date earlier than their move-in date is normal and correct. Only constraints about when they can visit (days, hours, "after work", "this Wednesday afternoon") count against a tour time. (Added 2026-10-12: a correct Wednesday booking was blocked because the renter's move-in window started two weeks later.)
 
+NOT a contradiction either (never block for this): a reply that says the renter's proposed time won't work and offers other times or an existing showing instead (templates counter, counter_existing, offer_existing*, propose_times). The system already checked the calendar, notice rules and agent availability before writing it, so turning down a time inside the advertised windows is expected and correct. Block such a reply only if a time it OFFERS is one the renter said they cannot make. (Added 2026-11-04: seven correct counters were blocked as "declines a time within the stated availability", and the renters heard nothing.)
+
 Anything else sends. Imperfect but harmless replies send. When unsure, send. reason: one short sentence (used in an alert to the property manager when blocked).
 
 Conversation (oldest first; US = us, RENTER = the prospect):

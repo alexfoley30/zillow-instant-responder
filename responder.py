@@ -79,7 +79,8 @@ _AFFIRM_RE = re.compile(
 
 # Templates that put a live, acceptable offer in front of the renter.
 OFFER_TEMPLATES = ("offer_existing", "offer_existing_p2", "offer_existing_snap",
-                   "offer_existing_reply", "propose_times", "counter")
+                   "offer_existing_reply", "propose_times", "counter",
+                   "counter_existing")
 
 
 def _newer_renter_message_exists(thread_id: str, message_id: str) -> bool:
@@ -1013,9 +1014,52 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
             log.error("booked FYI ping failed: %s", e)
         return "sent"
 
+    # CONSOLIDATE BEFORE COUNTERING (Alex 2026-11-04, Kylinn/Marigold: asked
+    # for 4:00 today at 2:17pm, too little notice, while a 5:30 showing sat on
+    # the calendar at the same house; "tell that girl we're doing a showing
+    # today at 5:30, there's no need for me to jump in"). When the renter's own
+    # time can't work but the house already has a showing on the day they
+    # asked for, offer that showing before any list of open times. Once only:
+    # an earlier offer means they already heard about it.
+    cf = _renter_facts(doc, cls)
+    already_offered = (doc or {}).get("last_reply_template") in OFFER_TEMPLATES
+    asked = []
+    for cand in cls.get("time_candidates", []):
+        try:
+            h, m = map(int, cand["time"].split(":"))
+            y, mo, d = map(int, cand["date"].split("-"))
+            asked.append(datetime(y, mo, d, h, m, tzinfo=AZ_TZ))
+        except (KeyError, ValueError, TypeError, AttributeError):
+            continue
+    if asked and not already_offered:
+        days = {a.date() for a in asked}
+        try:
+            hits = [hh for hh in cal.find_existing_showings(
+                        address, events=events, min_lead_hours=1, limit=10)
+                    if hh["start_az"].date() in days
+                    and cal.slot_acceptable_to_renter(hh["start_az"],
+                                                      cf["declined_iso"],
+                                                      cf["earliest_daily"],
+                                                      cf["latest_daily"])]
+        except Exception as e:  # noqa: BLE001
+            log.error("existing-showing lookup before counter failed: %s", e)
+            hits = []
+        if hits:
+            near = hits[0]
+            result = send_stage(
+                thread_id, f"reply__{message_id}", relay,
+                T.counter_existing(first_name, address,
+                                   cal.fmt_showing_time(asked[0]),
+                                   near["when_human"]),
+                [AWAITING_LABEL], [], {"template": "counter_existing"}, message_id)
+            if result == "sent":
+                ledger.transition(thread_id, ledger.OFFERED,
+                                  offered_start_iso=near["start_az"].isoformat(),
+                                  offered_event_id=(near["event"] or {}).get("id"))
+            return result
+
     # No candidate survived validation -> counter with nearest valid slots.
     try:
-        cf = _renter_facts(doc, cls)
         slots = cal.counter_slots(address, events, now_az=now_az,
                                   declined_iso=cf["declined_iso"],
                                   earliest_daily=cf["earliest_daily"],

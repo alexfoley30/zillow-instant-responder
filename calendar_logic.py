@@ -225,8 +225,15 @@ def validate_slot(start_az: datetime, address: str, events: list,
     if not ignore_same_house:
         existing = find_existing_showing(address, events=day_events,
                                          min_lead_hours=0)
+        # A "today" request always hears about today's existing showing first,
+        # however far apart the times are (Alex 2026-11-04: "if they say today
+        # we always offer the time we already have"); other days keep 6 hours.
+        today_ask = (existing is not None
+                     and start_az.date() == now_az.date()
+                     and existing["start_az"].date() == now_az.date())
         if (existing
-                and abs((existing["start_az"] - start_az).total_seconds()) < 3600 * 6
+                and (today_ask or
+                     abs((existing["start_az"] - start_az).total_seconds()) < 3600 * 6)
                 and slot_acceptable_to_renter(existing["start_az"], declined_iso,
                                               earliest_daily, latest_daily)):
             # Never offer a slot the renter already declined or can't make -
