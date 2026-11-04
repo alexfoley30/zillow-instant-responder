@@ -146,8 +146,13 @@ def _thread_send_failed_since(thread_id: str, claimed_at) -> bool:
     very message whose failure stranded the hash always looks slightly older
     than the claim. Without the grace the exemption can never fire for the
     primary case (verified live on Mitchell's thread, 2026-08-29)."""
-    failed_prefixes = ("skipped:event-failed", "error:", "no-send:calendar-error",
-                       "no-send:send-failed")
+    # "skipped:send-failed" is what send_stage and the two booked-then-email-
+    # failed paths actually record (responder.py); it also covers
+    # "skipped:send-failed-event-created". The old tuple listed
+    # "no-send:send-failed", which no caller ever writes, so the exemption
+    # never fired for a plain Composio send failure (review 2026-11-04).
+    failed_prefixes = ("skipped:send-failed", "skipped:event-failed", "error:",
+                       "no-send:calendar-error")
     try:
         db = init_db()
         q = db.collection("zillow_messages").where(
