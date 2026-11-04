@@ -241,8 +241,10 @@ def _showing_reminders():
         blocked = ledger.blocked_addresses()
     except Exception:  # noqa: BLE001
         blocked = []
+    # No limit: BOOKED never drains (18 today, growing), and Firestore returns the
+    # OLDEST 50 by id, so a cap would silently stop reminders for every new tour.
     q = (db.collection("zillow_threads")
-         .where("state", "==", ledger.BOOKED).limit(50))
+         .where("state", "==", ledger.BOOKED))
     for snap in q.stream():
         doc = snap.to_dict() or {}
         thread_id = snap.id
@@ -303,7 +305,9 @@ def _showing_reminders():
             continue
 
         first_name = doc.get("renter_name") or "there"
-        agent_name = agent_name or "Alex Foley"
+        # Alex shows every home since 2026-10-25; thread docs and old showings still
+        # carry Rhett or Jace (watchdog log 10/23, 10/26), so never name them.
+        agent_name = "Alex Foley"
         when_human = cal.fmt_showing_time(start_az)
         if which == "2h":
             stage = f"reminder_2h__{event_id}"

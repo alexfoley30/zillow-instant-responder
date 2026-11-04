@@ -427,7 +427,9 @@ def blocked_booking_guard(thread_id: str, first_name: str, address: str,
     at a home that is gone. Escalate, never auto-answer: the applicant may be
     the one writing, and "this home has been rented" is the wrong email for
     them. True = caller must stop without booking or sending."""
-    if intent not in ("accept_offer", "propose_time"):
+    # vague_time added 2026-11-04: "can I see it this weekend?" on a leased home
+    # used to get real times offered (the guard sat only on the exact-time paths).
+    if intent not in ("accept_offer", "propose_time", "vague_time"):
         return False
     try:
         blocked = rules.is_blocked_address(address, ledger.blocked_addresses())
