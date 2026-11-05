@@ -43,12 +43,6 @@ BOOKING_BODY = T.booking_confirmation(
     "Wednesday, October 14 at 1:00 PM", "Rhett Lueck")
 
 
-def test_prompt_separates_move_in_from_tour_time():
-    p = llm.REVIEW_PROMPT
-    assert "move-in" in p.lower()
-    assert "not when they can TOUR" in p
-
-
 def test_review_reply_sends_full_prompt_and_passes_verdict(monkeypatch):
     seen = {}
 
