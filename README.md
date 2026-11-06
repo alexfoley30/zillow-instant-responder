@@ -14,8 +14,11 @@ New Zillow email lands in alex@azfoleyhomes.com
 Renter has a reply in a few seconds, 24/7, independent of Alex's Mac.
 ```
 
-No AI in the hot path = no token cost, no Anthropic key, dirt cheap to run.
-`responder.py` is pure Python standard library — no pip install, no build step.
+This is no longer standard-library-only. `requirements.txt` exists and pins
+firebase-admin, anthropic, google-cloud-firestore, google-api-core, certifi and
+grpcio; `render.yaml` installs it (`buildCommand: pip install -r requirements.txt`).
+Claude Haiku does micro-calls for classify and extract only (`llm.py`), so
+`ANTHROPIC_API_KEY` is required too. The model never decides a booking.
 
 ## What's already done (by Claude)
 
@@ -64,7 +67,8 @@ The old key (`ck_7SYX8U2k...`) was pasted into a chat transcript, so treat it as
 
 ### Step 4 — Test
 
-Hit the URL in a browser — you should see `zillow-instant-responder ok` (health check).
+Hit the URL in a browser. The health check answers
+`zillow-pipeline ok (dry_run=True)`, and `dry_run` reads `False` once `DRY_RUN=false`.
 Then send a test Zillow-style inquiry (or wait for a real one) and confirm a reply goes
 out in seconds and the thread gets the `zillow/awaiting-renter` label.
 
