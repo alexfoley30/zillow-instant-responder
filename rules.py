@@ -73,6 +73,16 @@ def addr_slug(address: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", street).strip("-")
 
 
+def short_address(address: str) -> str:
+    """Street line only, for DISPLAY: '1294 E Apricot Ln, Gilbert, AZ 85298'
+    -> '1294 E Apricot Ln'. Every Poke ping and calendar title wants this;
+    before 2026-11-06 each site inlined .split(",")[0] and only the calendar
+    title remembered to .strip(), so a listing stored as "1294 E Apricot Ln ,
+    Gilbert" pinged Alex with a trailing space. Keys are a different job:
+    use street_key (exact match) or addr_slug (fact-sheet lookup)."""
+    return (address or "").split(",")[0].strip()
+
+
 def is_blocked_address(address: str, blocked_list: list) -> bool:
     a = (address or "").lower()
     for blocked in blocked_list or []:
