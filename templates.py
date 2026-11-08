@@ -115,27 +115,34 @@ def snap_offer(first_name, address, when_human, their_when_human):
     )
 
 
-def counter_proposal(first_name, slots_human):
-    """Template 4 - their time doesn't work; offer the nearest valid slots."""
+def counter_proposal(first_name, slots_human, reason=None):
+    """Template 4 - their time doesn't work; offer the nearest valid slots.
+    `reason` is one plain sentence on why their time can't be booked (Alex
+    2026-11-08: counters without a why were blocked by the review gate)."""
     lines = "\n".join(f"   {s} (Arizona time)" for s in slots_human)
+    why = (f"{reason} Here's what I can do instead:" if reason else
+           "That time doesn't quite work on my end, but here are a couple "
+           "that do:")
     return (
         f"Hi {first_name},\n\n"
-        "Thanks for sending that over! That time doesn't quite work on my end, "
-        "but here are a couple that do:\n\n"
+        f"Thanks for sending that over! {why}\n\n"
         f"{lines}\n\n"
         "Let me know which one works and I'll lock it in.\n\n"
         f"{SIGNATURE}"
     )
 
 
-def counter_existing(first_name, address, their_when_human, when_human):
+def counter_existing(first_name, address, their_when_human, when_human,
+                     reason=None):
     """Consolidate before countering (Alex 2026-11-04, Kylinn/Marigold): the
     renter's own time can't work, but the house already has a showing that
     day. Offer it plainly, and keep the door open for another time."""
+    why = (f"{reason} We" if reason else
+           f"The time you asked for ({their_when_human}) won't work on my end, "
+           "but we")
     return (
         f"Hi {first_name},\n\n"
-        "Thanks for getting back to me! The time you asked for "
-        f"({their_when_human}) won't work on my end, but we already have a showing "
+        f"Thanks for getting back to me! {why} already have a showing "
         f"lined up at {address} {when_human} (Arizona time). Can you make that "
         "one? Just say the word and I'll add you in.\n\n"
         "If that doesn't fit, send me another day and an exact time and I'll get "
@@ -161,14 +168,22 @@ def offer_existing_reply(first_name, when_human):
     )
 
 
-def propose_times(first_name, slots_human, today_closed=False):
+def propose_times(first_name, slots_human, today_closed=False, reason=None):
     """Concrete-slot offer for flexible/repeat vague renters (Alex 2026-08-23:
     never send the same ask twice; an 'anytime today' renter gets times, not
-    a menu). slots_human: 1-2 formatted times."""
+    a menu). slots_human: 1-2 formatted times. `reason` says why the day they
+    named has nothing open (2026-11-05: a Sunday ask got Monday times with no
+    why, and the review blocked it)."""
     lines = "\n".join(f"   {s} (Arizona time)" for s in slots_human)
-    opener = ("Today's showing window has wrapped up on my end, but here's "
-              "the very next opening I have:" if today_closed else
-              "Let's make this easy - here's what I can do:")
+    if today_closed:
+        opener = ("Today's showing window has wrapped up on my end, but here's "
+                  "the very next opening I have:")
+    elif reason:
+        opener = (f"{reason} Here are the next openings I have:"
+                  if len(slots_human) > 1 else
+                  f"{reason} Here's the next opening I have:")
+    else:
+        opener = "Let's make this easy - here's what I can do:"
     neither = "neither works" if len(slots_human) > 1 else "that doesn't work"
     return (
         f"Hi {first_name},\n\n"

@@ -29,11 +29,12 @@ Env (Render dashboard):
   ANTHROPIC_API_KEY, POKE_ENDPOINT, DRY_RUN ("true"/"false")
 """
 
+import contextvars
 import json
 import logging
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
@@ -182,7 +183,20 @@ def review_gate(thread_id: str, body: str, template: str,
     return True, ""
 
 
+# While a renter message is being handled, review blocks are held here instead
+# of Poking Alex at once, so the handler can try ONE more time to book or offer
+# times on the renter's own day before anyone is pinged (Alex 2026-11-08: "get
+# rid of the poke nudge system and just book things"; 13 of 37 renter messages
+# in a week ended review-blocked with a Poke and nothing sent). None = no
+# handler is listening, escalate straight away (cron reminders, /send-approved).
+_HELD_BLOCKS = contextvars.ContextVar("held_review_blocks", default=None)
+
+
 def _escalate_review_block(thread_id: str, reason: str, template: str):
+    held = _HELD_BLOCKS.get()
+    if held is not None:
+        held.append((thread_id, reason, template))
+        return
     doc = ledger.get_thread(thread_id) or {}
     needs_human(thread_id, doc.get("renter_name") or "the renter",
                 doc.get("property_address") or "the property",
@@ -304,10 +318,80 @@ def needs_human(thread_id: str, first_name: str, address: str, last_line: str,
                       first_name)
 
 
+# Templates that ask for, or offer, a time. When the review gate blocks one of
+# these and the renter gave us a day, a time or a window, the handler tries once
+# to book or offer on that day before escalating.
+_RETRYABLE_TEMPLATES = ("availability_ask", "windows_ask", "offer_existing",
+                        "propose_times")
+
+
+def _with_block_retry(handler, retry):
+    """Run handler() with review blocks held. If it ended review-blocked on a
+    scheduling ask, run retry(template) once: it returns a send result, or
+    None when the renter gave nothing to book on. Blocks nobody recovered from
+    escalate exactly as before; a block inside the retry escalates itself."""
+    token = _HELD_BLOCKS.set([])
+    try:
+        out = handler()
+    finally:
+        held = _HELD_BLOCKS.get()
+        _HELD_BLOCKS.reset(token)
+    if not held:
+        return out
+    retried = None
+    if out == "no-send:review-blocked" and len(held) == 1 and \
+            held[0][2].startswith(_RETRYABLE_TEMPLATES):
+        try:
+            retried = retry(held[0][2])
+        except Exception as e:  # noqa: BLE001 - a failed retry falls back to the ping
+            log.exception("review-block retry crashed on %s: %s", held[0][0], e)
+            retried = None
+    if retried is not None and (retried in ("sent", "shadowed")
+                                or retried.startswith("no-send:")):
+        # Sent, or the retry already told Alex itself (its own block, no
+        # slots, calendar down).
+        log.info("review-block retry on %s: %s", held[0][0], retried)
+        return retried
+    for thread_id, reason, template in held:
+        _escalate_review_block(thread_id, reason, template)
+    return out
+
+
+def _classify_first_message(text: str, now_az):
+    """A first message that names a day or a time is read the same way replies
+    are (TJ, 2026-11-08, 220 N 22nd Pl #2094: "this Wednesday between 2 and
+    5 pm? Or this Friday anytime after 2 pm?" got the generic what-day ask, the
+    review blocked it, and he heard nothing). Only an LLM reading is trusted
+    here: the regex fallback cannot read windows, and without it the first
+    reply stays the plain ask it always was."""
+    if not rules.has_schedule_hint(text):
+        return None
+    try:
+        cls = llm.classify_reply(text, "", now_az, transcript=f"RENTER: {text}")
+    except Exception as e:  # noqa: BLE001 - never block the instant reply
+        log.error("first-message classify failed: %s", e)
+        return None
+    if not cls or cls.get("_fallback"):
+        return None
+    return rules.snap_weekday_dates(cls, now_az)
+
+
 # ---------------------------------------------------------------- new inquiry
 
 def handle_new_inquiry(thread_id: str, first_name: str, address: str,
                        relay: str, renter_text: str, message_id: str) -> str:
+    ctx = {}
+    return _with_block_retry(
+        lambda: _handle_new_inquiry(thread_id, first_name, address, relay,
+                                    renter_text, message_id, ctx),
+        lambda template: _retry_on_their_day(
+            thread_id, ctx.get("doc"), first_name, address, relay,
+            ctx.get("cls"), renter_text, message_id, ctx.get("now_az"),
+            stage="first_reply__retry", lead=ctx.get("lead", "")))
+
+
+def _handle_new_inquiry(thread_id, first_name, address, relay, renter_text,
+                        message_id, ctx) -> str:
     if rules.is_blocked_address(address, ledger.blocked_addresses()):
         ledger.create_thread(thread_id, state=ledger.LEASED, renter_name=first_name,
                              property_address=address, relay_email=relay)
@@ -325,13 +409,52 @@ def handle_new_inquiry(thread_id: str, first_name: str, address: str,
     rule = facts.standing_rule_for(renter_text) if has_q else None
     answer = facts.ANSWER_LINES.get(rule) if rule else None
 
+    now_az = datetime.now(AZ_TZ)
+    cls = _classify_first_message(clean, now_az)
+    ack = has_q and not answer
+    if ack and cls is not None and not cls.get("question_text"):
+        ack = False  # the only "?" was the tour ask itself ("free Wednesday?")
+    lead = T._lead_block(ack, answer)
+    doc = {"renter_name": first_name, "property_address": address,
+           "relay_email": relay}
+    ctx.update(cls=cls, now_az=now_az, lead=lead, doc=doc)
+
+    def _finish(result):
+        if ack and result in ("sent", "shadowed"):
+            try:
+                if not dry_run():
+                    gm.modify_labels(thread_id, [NEEDS_REPLY_LABEL], [])
+            except Exception as e:  # noqa: BLE001
+                log.error("needs-reply label failed: %s", e)
+            needs_human(thread_id, first_name, address, renter_text[:120])
+        return result
+
+    # A specific time or a day+window books now, through the same path a
+    # reply takes (validate_slot, Alex then Jace then Rhett for their own
+    # time, fold into a same-house showing, event before the email). A bare
+    # day gets real open times on that day.
+    if cls is not None:
+        named = rules.named_tour_dates(cls, clean, now_az)
+        if _expand_candidates(cls, now_az) or named:
+            ledger.create_thread(
+                thread_id, state=ledger.ACKED, renter_name=first_name,
+                property_address=address, relay_email=relay,
+                has_open_question=ack)
+            out = _retry_on_their_day(thread_id, doc, first_name, address,
+                                      relay, cls, clean, message_id, now_az,
+                                      stage="first_reply", lead=lead)
+            # Calendar down or a fully booked week: the plain first reply
+            # still goes out below rather than leaving a new lead in silence.
+            if out is not None and out not in ("no-send:calendar-error",
+                                               "no-send:needs-human"):
+                return _finish(out)
+
     existing = None
     try:
         existing = cal.find_existing_showing(address)
     except Exception as e:  # noqa: BLE001 - never block the instant reply
         log.error("consolidate-first lookup failed: %s", e)
 
-    ack = has_q and not answer
     if existing:
         body = T.offer_existing(first_name, address, existing["when_human"],
                                 ack=ack, answer=answer)
@@ -449,6 +572,23 @@ def blocked_booking_guard(thread_id: str, first_name: str, address: str,
 
 def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
                  message_id: str) -> str:
+    ctx = {}
+
+    def _retry(template):
+        if not ctx.get("relay"):
+            return None
+        return _retry_on_their_day(
+            thread_id, doc, ctx["first_name"], ctx["address"], ctx["relay"],
+            ctx.get("cls"), renter_text, message_id, ctx.get("now_az"),
+            stage=f"reply__{message_id}__retry", msgs=msgs)
+
+    return _with_block_retry(
+        lambda: _handle_reply(thread_id, doc, msgs, renter_text, message_id,
+                              ctx),
+        _retry)
+
+
+def _handle_reply(thread_id, doc, msgs, renter_text, message_id, ctx) -> str:
     first_name = doc.get("renter_name") or "there"
     address = doc.get("property_address") or ""
     relay = gm.relay_from_thread(msgs) or doc.get("relay_email") or ""
@@ -463,6 +603,8 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
     cls = rules.snap_weekday_dates(
         llm.classify_reply(renter_text, last_alex, now_az,
                            transcript=gm.thread_transcript(msgs)), now_az)
+    ctx.update(first_name=first_name, address=address, relay=relay, cls=cls,
+               now_az=now_az)
     ledger.record_message_outcome(message_id, "classified", cls)
     if not cls.get("_fallback"):
         # Persist the whole-thread renter facts; each LLM pass re-derives
@@ -562,15 +704,7 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
                 # Proposal-backed offer (propose_times / counter): the yes
                 # books the proposed slot itself through the full validated
                 # path - agent pick, event creation, urgent same-day ping.
-                pick = None
-                for iso in doc.get("proposed_slots_iso") or []:
-                    try:
-                        c_dt = datetime.fromisoformat(iso)
-                        if c_dt > now_az:
-                            pick = c_dt
-                            break
-                    except (ValueError, TypeError):
-                        continue
+                pick = _pick_proposed_slot(doc, cls, renter_text, now_az)
                 if pick:
                     cls_slot = dict(cls)
                     cls_slot["time_candidates"] = [{
@@ -588,7 +722,11 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
                     urgent=True)
         return "no-send:accept-no-live-offer"
 
-    if intent == "propose_time":
+    # A day with a window ("Wednesday between 2 and 5", "Friday after 2") is a
+    # time the renter can make: book the earliest valid slot in it instead of
+    # asking again (Alex 2026-11-08: "just book things").
+    if intent == "propose_time" or (intent == "vague_time" and any(
+            i["kind"] == "window" for i in _expand_candidates(cls, now_az))):
         return book_proposed_time(thread_id, doc, first_name, address, relay,
                                   cls, message_id, now_az)
 
@@ -639,47 +777,11 @@ def handle_reply(thread_id: str, doc: dict, msgs: list, renter_text: str,
         # windows-ask, the review blocked it, and he waited all night).
         named_dates = rules.named_tour_dates(cls, renter_text, now_az)
         if flexible or repeat or wants_today or named_dates:
-            try:
-                events = cal.list_events(3)
-            except Exception as e:  # noqa: BLE001
-                log.error("vague slot fetch failed: %s", e)
-                events = []
-            cand = []
-            try:
-                vf = _renter_facts(doc, cls)
-                kw = dict(now_az=now_az, declined_iso=vf["declined_iso"],
-                          earliest_daily=vf["earliest_daily"],
-                          latest_daily=vf["latest_daily"])
-                if address and named_dates:
-                    per_day = 1 if len(named_dates) > 1 else 2
-                    for d in named_dates:
-                        cand += cal.counter_slots(address, events, count=per_day,
-                                                  only_dates={d}, **kw)
-                if address and not cand:
-                    cand = cal.counter_slots(address, events, **kw)
-            except Exception as e:  # noqa: BLE001
-                log.error("vague counter_slots failed: %s", e)
-            if cand:
-                today_missed = wants_today and cand[0].date() != now_az.date()
-                if today_missed:
-                    needs_human(thread_id, first_name, address,
-                                f"wants TODAY, earliest bookable is "
-                                f"{cal.fmt_showing_time(cand[0])}: {renter_text[:60]}",
-                                urgent=True)
-                result = send_stage(
-                    thread_id, f"reply__{message_id}", relay,
-                    T.propose_times(first_name,
-                                    [cal.fmt_showing_time(s) for s in cand],
-                                    today_closed=today_missed),
-                    [AWAITING_LABEL], [], {"template": "propose_times"},
-                    message_id)
-                if result == "sent":
-                    # A proposal must be bookable when accepted (Makynna
-                    # 2026-08-24: her yes to a proposed slot dead-ended in
-                    # NEEDS_HUMAN because no event existed behind it).
-                    ledger.upsert_thread(
-                        thread_id,
-                        proposed_slots_iso=[c.isoformat() for c in cand])
+            result = _offer_times(thread_id, doc, first_name, address, relay,
+                                  cls, renter_text, message_id, now_az,
+                                  named_dates, wants_today=wants_today,
+                                  consolidate=False)
+            if result is not None:
                 return result
             needs_human(thread_id, first_name, address,
                         f"flexible renter, no valid slots to offer: {renter_text[:60]}")
@@ -790,8 +892,321 @@ def _we_offered(doc, start_az) -> bool:
     return False
 
 
+# ------------------------------------------------- the renter's own day/time
+
+_HHMM_RE = re.compile(r"^\d{1,2}:\d{2}$")
+
+
+def _hhmm(value):
+    """'14:00' or None (a malformed bound from the extractor is dropped)."""
+    return value if isinstance(value, str) and _HHMM_RE.match(value) else None
+
+
+def _clock(t) -> str:
+    return t.strftime("%-I:%M %p")
+
+
+def _cand_date(cand: dict):
+    try:
+        return date.fromisoformat((cand or {}).get("date") or "")
+    except (TypeError, ValueError):
+        return None
+
+
+def _window_slots(d, after, before) -> list:
+    """Every :00/:30 start on day d inside our showing hours AND the renter's
+    window, earliest first. Empty when the two don't overlap."""
+    lo, hi = rules.SHOWING_WINDOWS[d.weekday()]
+    t = datetime.combine(d, lo, tzinfo=AZ_TZ)
+    close = datetime.combine(d, hi, tzinfo=AZ_TZ)
+    out = []
+    while t < close:
+        if rules.in_window(t) and rules.respects_renter_bounds(t, after, before):
+            out.append(t)
+        t += timedelta(minutes=30)
+    return out
+
+
+def _expand_candidates(cls: dict, now_az) -> list:
+    """The renter's bookable asks, in the order they gave them: an exact time
+    ("Tuesday at 12:30") or a day with a window ("Wednesday between 2 and 5",
+    "Friday after 2"). A bare day ("Sunday") is not bookable on its own; it
+    gets real times offered on it instead (rules.named_tour_dates)."""
+    items = []
+    for c in (cls or {}).get("time_candidates") or []:
+        d = _cand_date(c)
+        if d is None:
+            continue
+        after, before = _hhmm(c.get("after")), _hhmm(c.get("before"))
+        if _hhmm(c.get("time")):
+            h, m = map(int, c["time"].split(":"))
+            try:
+                start = datetime(d.year, d.month, d.day, h, m, tzinfo=AZ_TZ)
+            except ValueError:
+                continue
+            items.append({"kind": "exact", "date": d, "slots": [start],
+                          "after": after, "before": before})
+        elif (after or before) and d >= now_az.date():
+            items.append({"kind": "window", "date": d,
+                          "slots": _window_slots(d, after, before),
+                          "after": after, "before": before})
+    return items
+
+
+def _asked_when(item: dict) -> str:
+    """How the renter's own ask reads back to them."""
+    if item["kind"] == "exact":
+        return cal.fmt_showing_time(item["slots"][0])
+    day = item["date"].strftime("%A, %B %-d")
+    fmt = lambda s: _clock(datetime.strptime(s, "%H:%M"))  # noqa: E731
+    if item["after"] and item["before"]:
+        return f"{day} between {fmt(item['after'])} and {fmt(item['before'])}"
+    if item["after"]:
+        return f"{day} after {fmt(item['after'])}"
+    return f"{day} before {fmt(item['before'])}"
+
+
+def _hours_line(d) -> str:
+    lo, hi = rules.SHOWING_WINDOWS[d.weekday()]
+    return f"{d.strftime('%A')}s from {_clock(lo)} to {_clock(hi)}"
+
+
+def _reason_line(items: list, failures: list) -> str | None:
+    """One plain sentence on why the renter's FIRST ask can't be booked, taken
+    from what validate_slot and rules.in_window actually said (the review
+    blocked counters that turned a renter down "without explaining why")."""
+    if not items:
+        return None
+    first = items[0]
+    when = _asked_when(first)
+    if first["kind"] == "window" and not first["slots"]:
+        return (f"I only show homes on {_hours_line(first['date'])} (Arizona "
+                f"time), so {when} falls outside that.")
+    why = [r for (it, r) in failures if it is first]
+    if not why:
+        return None
+    if all(r == "past" for r in why):
+        return f"{when[0].upper()}{when[1:]} has already passed."
+    if first["kind"] == "exact" and "out-of-window" in why:
+        return (f"I only show homes on {_hours_line(first['date'])} (Arizona "
+                f"time), so {first['slots'][0].strftime('%-I:%M %p')} falls "
+                "outside that.")
+    if all(r in ("too-soon", "past") for r in why):
+        return ("I need about two hours' notice to get someone out there, so "
+                f"{when} is too soon.")
+    if all(r in ("renter-cannot-make-it", "violates-renter-bounds")
+           for r in why):
+        return None
+    return f"{when[0].upper()}{when[1:]} is already booked up on my end."
+
+
+def _day_reason(d, now_az) -> str | None:
+    """Why a named day got no times: the day is over, or it is full."""
+    if d < now_az.date():
+        return None
+    if d == now_az.date():
+        return "Today is already booked up on my end."
+    return f"{d.strftime('%A')} is already booked up on my end."
+
+
+def _with_lead(body: str, lead: str) -> str:
+    """Put a first reply's lead-in (standing-rule answer or question ack) right
+    after the greeting, so a first message still gets ONE email."""
+    return body.replace("\n\n", "\n\n" + lead, 1) if lead else body
+
+
+_CLOCK_IN_TEXT = re.compile(
+    r"\b(\d{1,2})(?::?(\d{2}))\s*(am|pm|a\.m\.|p\.m\.)?|\b(\d{1,2})\s*(am|pm)\b",
+    re.IGNORECASE)
+
+
+def _pick_proposed_slot(doc, cls, renter_text, now_az):
+    """Which of our proposed times the renter said yes to. Crystal, 2026-11-08
+    (220 N 22nd Pl #2094): offered Tuesday 12:00 and 12:30, she wrote "tuesday
+    at 1230 would be great", the classifier called it a plain yes with no
+    time, and the old code booked the FIRST proposal, 12:00; the review caught
+    the wrong time and she heard nothing. Match the time she named (the
+    extractor's candidates, then her own digits); only a bare yes takes the
+    first future proposal."""
+    future = []
+    for iso in (doc or {}).get("proposed_slots_iso") or []:
+        try:
+            c_dt = datetime.fromisoformat(iso)
+        except (ValueError, TypeError):
+            continue
+        if c_dt > now_az:
+            future.append(c_dt)
+    if not future:
+        return None
+    for c in (cls or {}).get("time_candidates") or []:
+        if _hhmm(c.get("time")):
+            for s in future:
+                if s.strftime("%H:%M") == c["time"].zfill(5) and (
+                        not c.get("date") or s.date().isoformat() == c["date"]):
+                    return s
+    named = set()
+    for m in _CLOCK_IN_TEXT.finditer(renter_text or ""):
+        if m.group(1) is not None:
+            named.add((int(m.group(1)) % 12, int(m.group(2))))
+        else:
+            named.add((int(m.group(4)) % 12, 0))
+    hits = [s for s in future if (s.hour % 12, s.minute) in named]
+    return hits[0] if hits else future[0]
+
+
+def _earlier_schedule(msgs: list, current_text: str, now_az):
+    """The day/time a renter gave in an EARLIER message, for the review-block
+    retry (2026-11-06: "If this rental is still available, we would like to
+    tour" got the week's windows although the renter had asked for Sunday a
+    message before, and the review blocked it). Each message is read as of
+    when it was written, so its "tomorrow" means the right day. Returns
+    (cls, text) or (None, current_text)."""
+    seen = 0
+    for m in reversed(msgs or []):
+        if not gm.is_from_relay(m):
+            continue
+        text = gm.extract_renter_text(m) or ""
+        if not text.strip() or text.strip() == (current_text or "").strip():
+            continue
+        seen += 1
+        if seen > 3:
+            break
+        if not rules.has_schedule_hint(text):
+            continue
+        said_at = gm.msg_time(m)
+        said_at = said_at.astimezone(AZ_TZ) if said_at else now_az
+        c = _classify_first_message(text, said_at)
+        if c and (_expand_candidates(c, now_az)
+                  or [d for d in rules.named_tour_dates(c, text, said_at)
+                      if d >= now_az.date()]):
+            return c, text
+    return None, current_text
+
+
+def _retry_on_their_day(thread_id, doc, first_name, address, relay, cls,
+                        renter_text, message_id, now_az, stage=None, lead="",
+                        msgs=None):
+    """Book or offer times on the day the renter gave us. A specific time or
+    a day+window books (book_proposed_time); a bare day gets real open times
+    on it (_offer_times). Used for first messages and, once, after the review
+    gate blocks a scheduling ask. None = the renter gave no day to work with."""
+    now_az = now_az or datetime.now(AZ_TZ)
+    doc = doc or {}
+    text = renter_text
+    use = cls if cls and (_expand_candidates(cls, now_az) or
+                          rules.named_tour_dates(cls, text, now_az)) else None
+    if use is None and msgs:
+        use, text = _earlier_schedule(msgs, renter_text, now_az)
+    if use is None:
+        return None
+    if _expand_candidates(use, now_az):
+        return book_proposed_time(thread_id, doc, first_name, address, relay,
+                                  use, message_id, now_az, stage=stage,
+                                  lead=lead)
+    named = [d for d in rules.named_tour_dates(use, text, now_az)
+             if d >= now_az.date()]
+    if not named:
+        return None
+    return _offer_times(thread_id, doc, first_name, address, relay, use, text,
+                        message_id, now_az, named,
+                        wants_today=bool(use.get("wants_same_day")),
+                        stage=stage, lead=lead)
+
+
+def _offer_times(thread_id, doc, first_name, address, relay, cls, renter_text,
+                 message_id, now_az, named_dates, wants_today=False,
+                 stage=None, lead="", consolidate=True):
+    """Real open times, on the renter's named day(s) first (Victor 2026-10-27),
+    with a plain reason when their day has nothing open. Times WE pick stay
+    Alex-only (counter_slots). consolidate=True first offers a showing already
+    on the calendar at this house on their day, once per thread. Returns the
+    send result, or None when there is nothing at all to offer."""
+    stage = stage or f"reply__{message_id}"
+    doc = doc or {}
+    try:
+        # A week, not three days: a Thursday ask for next Tuesday was being
+        # checked against a calendar that stopped at Sunday.
+        events = cal.list_events(8)
+    except Exception as e:  # noqa: BLE001
+        log.error("offer slot fetch failed: %s", e)
+        events = []
+    vf = _renter_facts(doc, cls)
+    if (consolidate and named_dates and address
+            and doc.get("last_reply_template") not in OFFER_TEMPLATES):
+        try:
+            hits = [h for h in cal.find_existing_showings(
+                        address, events=events, limit=10)
+                    if h["start_az"].date() in named_dates
+                    and cal.slot_acceptable_to_renter(
+                        h["start_az"], vf["declined_iso"],
+                        vf["earliest_daily"], vf["latest_daily"])]
+        except Exception as e:  # noqa: BLE001
+            log.error("existing-showing lookup before offer failed: %s", e)
+            hits = []
+        if hits:
+            near = hits[0]
+            first = stage.startswith("first_reply")
+            body = (T.offer_existing(first_name, address, near["when_human"])
+                    if first else
+                    T.offer_existing_reply(first_name, near["when_human"]))
+            template = "offer_existing" if first else "offer_existing_reply"
+            result = send_stage(thread_id, stage, relay, _with_lead(body, lead),
+                                [AWAITING_LABEL], [], {"template": template},
+                                message_id)
+            if result == "sent":
+                ledger.transition(
+                    thread_id, ledger.OFFERED,
+                    offered_start_iso=near["start_az"].isoformat(),
+                    offered_event_id=near["event"].get("id", ""))
+            return result
+    cand = []
+    try:
+        kw = dict(now_az=now_az, declined_iso=vf["declined_iso"],
+                  earliest_daily=vf["earliest_daily"],
+                  latest_daily=vf["latest_daily"])
+        if address and named_dates:
+            per_day = 1 if len(named_dates) > 1 else 2
+            for d in named_dates:
+                cand += cal.counter_slots(address, events, count=per_day,
+                                          only_dates={d}, **kw)
+        if address and not cand:
+            cand = cal.counter_slots(address, events, **kw)
+    except Exception as e:  # noqa: BLE001
+        log.error("offer counter_slots failed: %s", e)
+    if not cand:
+        return None
+    today_missed = wants_today and cand[0].date() != now_az.date()
+    if today_missed:
+        needs_human(thread_id, first_name, address,
+                    f"wants TODAY, earliest bookable is "
+                    f"{cal.fmt_showing_time(cand[0])}: {renter_text[:60]}",
+                    urgent=True)
+    reason = None
+    if named_dates and not today_missed and not any(
+            c.date() in named_dates for c in cand):
+        reason = _day_reason(named_dates[0], now_az)
+    result = send_stage(
+        thread_id, stage, relay,
+        _with_lead(T.propose_times(first_name,
+                                   [cal.fmt_showing_time(s) for s in cand],
+                                   today_closed=today_missed, reason=reason),
+                   lead),
+        [AWAITING_LABEL], [], {"template": "propose_times"}, message_id)
+    if result == "sent":
+        # A proposal must be bookable when accepted (Makynna 2026-08-24: her
+        # yes to a proposed slot dead-ended in NEEDS_HUMAN because no event
+        # existed behind it).
+        ledger.upsert_thread(thread_id,
+                             proposed_slots_iso=[c.isoformat() for c in cand])
+    return result
+
+
 def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
-                       message_id, now_az) -> str:
+                       message_id, now_az, stage=None, lead="") -> str:
+    """Book the renter's own time or window, else counter on their day with a
+    reason. stage/lead let a first message use this same path ("first_reply",
+    with its standing-rule answer or question ack inline)."""
+    stage = stage or f"reply__{message_id}"
     # Calendar read failing here used to kill the whole handler AFTER the
     # "classified" outcome was recorded - Andrea's propose_time vanished
     # without a trace in the 7/30-8/1 shadow. Fail loud and safe instead.
@@ -802,217 +1217,79 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         needs_human(thread_id, first_name, address,
                     f"calendar unavailable while booking: {str(e)[:80]}")
         return "no-send:calendar-error"
-    for cand in cls.get("time_candidates", []):
-        if not cand.get("date") or not cand.get("time"):
-            continue
-        try:
-            h, m = map(int, cand["time"].split(":"))
-            y, mo, d = map(int, cand["date"].split("-"))
-            start_az = datetime(y, mo, d, h, m, tzinfo=AZ_TZ)
-        except (ValueError, TypeError):
-            continue
-        if start_az < now_az:
-            continue
-        # CONSOLIDATE ONCE (Alec 2026-08-25: three identical "come at 3:15"
-        # replies to a renter who asked for 6pm every time). The existing
-        # slot gets offered a single time; once the renter answers an offer
-        # with their own valid time, that time books - a second trip beats
-        # a lost lead.
-        already_offered = (doc or {}).get("last_reply_template") in OFFER_TEMPLATES
-        facts = _renter_facts(doc, cls)
-        we_offered = _we_offered(doc, start_az)
-        v = cal.validate_slot(start_az, address, events,
-                              bounds={"after": cand.get("after"),
-                                      "before": cand.get("before")},
-                              now_az=now_az,
-                              ignore_same_house=already_offered,
-                              declined_iso=facts["declined_iso"],
-                              earliest_daily=facts["earliest_daily"],
-                              latest_daily=facts["latest_daily"],
-                              enforce_daily_bounds=False,
-                              we_offered=we_offered,
-                              allow_cover=True)
-        if v.get("fold"):
-            existing = v["fold"]
-            result = send_stage(
-                thread_id, f"reply__{message_id}", relay,
-                T.offer_existing(first_name, address, existing["when_human"]),
-                [AWAITING_LABEL], [], {"template": "offer_existing_p2"}, message_id)
-            if result == "sent":
-                # Arm the offer properly so a yes folds into THIS event
-                # (before 8/25 the p2 offer never recorded what it offered).
-                ledger.transition(
-                    thread_id, ledger.OFFERED,
-                    offered_start_iso=existing["start_az"].isoformat(),
-                    offered_event_id=existing["event"].get("id", ""))
-            return result
-        if not v.get("ok"):
-            continue
+    # CONSOLIDATE ONCE (Alec 2026-08-25: three identical "come at 3:15"
+    # replies to a renter who asked for 6pm every time). The existing
+    # slot gets offered a single time; once the renter answers an offer
+    # with their own valid time, that time books - a second trip beats
+    # a lost lead.
+    already_offered = (doc or {}).get("last_reply_template") in OFFER_TEMPLATES
+    rf = _renter_facts(doc, cls)
+    items = _expand_candidates(cls, now_az)
+    failures = []
+    for item in items:
+        # An exact time is the renter's own: Alex, then Jace, then Rhett. A
+        # window tries every slot with Alex first and only then lets Jace or
+        # Rhett cover, so an open Alex slot at 3 beats a Jace slot at 2.
+        passes = (True,) if item["kind"] == "exact" else (False, True)
+        for allow_cover in passes:
+            last_pass = allow_cover == passes[-1]
+            for start_az in item["slots"]:
+                if start_az < now_az:
+                    if last_pass:
+                        failures.append((item, "past"))
+                    continue
+                kw = dict(bounds={"after": item["after"],
+                                  "before": item["before"]},
+                          now_az=now_az,
+                          declined_iso=rf["declined_iso"],
+                          earliest_daily=rf["earliest_daily"],
+                          latest_daily=rf["latest_daily"],
+                          enforce_daily_bounds=False,
+                          we_offered=_we_offered(doc, start_az),
+                          allow_cover=allow_cover)
+                v = cal.validate_slot(start_az, address, events,
+                                      ignore_same_house=already_offered, **kw)
+                if (v.get("fold") and item["kind"] == "window"
+                        and not rules.respects_renter_bounds(
+                            v["fold"]["start_az"], item["after"],
+                            item["before"])):
+                    # A showing already on the calendar outside the renter's
+                    # window is no use to them: book inside the window.
+                    v = cal.validate_slot(start_az, address, events,
+                                          ignore_same_house=True, **kw)
+                if v.get("fold"):
+                    existing = v["fold"]
+                    result = send_stage(
+                        thread_id, stage, relay,
+                        _with_lead(T.offer_existing(first_name, address,
+                                                    existing["when_human"]),
+                                   lead),
+                        [AWAITING_LABEL], [], {"template": "offer_existing_p2"},
+                        message_id)
+                    if result == "sent":
+                        # Arm the offer properly so a yes folds into THIS
+                        # event (before 8/25 the p2 offer never recorded
+                        # what it offered).
+                        ledger.transition(
+                            thread_id, ledger.OFFERED,
+                            offered_start_iso=existing["start_az"].isoformat(),
+                            offered_event_id=existing["event"].get("id", ""))
+                    return result
+                if not v.get("ok"):
+                    if last_pass:
+                        failures.append((item, v.get("reason")))
+                    continue
+                return _book_valid_slot(thread_id, doc, first_name, address,
+                                        relay, start_az, v, events,
+                                        message_id, stage, lead)
 
-        if _newer_renter_message_exists(thread_id, message_id):
-            needs_human(thread_id, first_name, address,
-                        "renter sent another message while this one was "
-                        "being processed - book by hand", urgent=True)
-            return "no-send:superseded-by-newer-message"
-
-        # ADJACENCY SNAP (Alex 2026-08-30: "we always try and consolidate").
-        # T booked 5pm and Schneider 6pm at the same house minutes apart
-        # because consolidate-ONCE was already spent on both threads. When the
-        # renter's own valid proposal lands within an hour of an existing
-        # same-house showing, the existing slot gets offered ONE more time,
-        # framed as convenience and triggered only by their proposal - once
-        # per thread, so the Alec repeat-push pattern cannot come back.
-        # Within five minutes of the existing slot there is nothing left to
-        # negotiate: fold them straight in and confirm the existing time.
-        if not (doc or {}).get("snap_offered") and not dry_run():
-            near = None
-            for hit in cal.find_existing_showings(address, events=events,
-                                                  limit=4):
-                if abs((hit["start_az"] - start_az).total_seconds()) <= 3600:
-                    near = hit
-                    break
-            if near:
-                ev_id = near["event"].get("id", "")
-                diff_s = abs((near["start_az"] - start_az).total_seconds())
-                stage_probe = f"reply__{message_id}"
-                if diff_s <= 300:
-                    verdict = ledger.reserve_send(
-                        thread_id, stage_probe, {"template": "booking_fold_snap"})
-                    if verdict in ("already-sent", "in-flight"):
-                        return f"skipped:{verdict}"
-                    if verdict == "recover":
-                        msgs2 = gm.fetch_thread(thread_id)
-                        if gm.alex_replied_after(msgs2, message_id):
-                            ledger.mark_sent(thread_id, stage_probe,
-                                             recovered="backfilled")
-                            return "skipped:recovered"
-                        if not ledger.takeover_send(thread_id, stage_probe):
-                            return "skipped:takeover-lost"
-                    agent_name = cal.agent_name_from_event(near["event"])
-                    body = T.booking_confirmation(first_name, address,
-                                                  near["when_human"], agent_name)
-                    ok, why = review_gate(thread_id, body, "booking_fold_snap")
-                    if not ok:
-                        ledger.mark_failed(thread_id, stage_probe,
-                                           f"review-blocked: {why}")
-                        _escalate_review_block(thread_id, why, "booking_fold_snap")
-                        return "no-send:review-blocked"
-                    try:
-                        cal.fold_renter_into_event(near["event"], first_name)
-                    except Exception as e:  # noqa: BLE001
-                        ledger.mark_failed(thread_id, stage_probe, f"fold: {e}")
-                        return "skipped:event-failed"
-                    try:
-                        gm.send_reply(thread_id, relay, body)
-                    except Exception as e:  # noqa: BLE001
-                        ledger.mark_failed(thread_id, stage_probe,
-                                           f"send-after-fold: {e} event_id={ev_id}")
-                        return "skipped:send-failed-event-created"
-                    ledger.mark_sent(thread_id, stage_probe, event_id=ev_id)
-                    ledger.transition(thread_id, ledger.BOOKED, event_id=ev_id,
-                                      snap_offered=True)
-                    try:
-                        gm.modify_labels(thread_id, [HANDLED_LABEL],
-                                         [AWAITING_LABEL])
-                    except Exception as e:  # noqa: BLE001
-                        ledger.set_labels_pending(thread_id, stage_probe,
-                                                  [HANDLED_LABEL],
-                                                  [AWAITING_LABEL])
-                        log.error("label failed after snap fold: %s", e)
-                    try:
-                        gm.poke_ping(
-                            f"Booked (joined existing): {first_name} - "
-                            f"{address.split(',')[0]} - {near['when_human']}. [FYI]")
-                    except Exception as e:  # noqa: BLE001
-                        log.error("snap fold FYI ping failed: %s", e)
-                    return "sent"
-                their_when = cal.fmt_showing_time(start_az)
-                result = send_stage(
-                    thread_id, stage_probe, relay,
-                    T.snap_offer(first_name, address, near["when_human"],
-                                 their_when),
-                    [AWAITING_LABEL], [], {"template": "offer_existing_snap"},
-                    message_id)
-                if result == "sent":
-                    ledger.transition(
-                        thread_id, ledger.OFFERED,
-                        offered_start_iso=near["start_az"].isoformat(),
-                        offered_event_id=ev_id,
-                        snap_offered=True)
-                return result
-
-        agent, same_day = v["agent"], v["same_day"]
-        jace_cover = v.get("jace_cover")
-        when_human = cal.fmt_showing_time(start_az)
-        jace_ping = None
-        if same_day or jace_cover:
-            reason = ("Alex busy" if jace_cover else "same-day")
-            jace_ping = (f"{agent['name'].split()[0]} assigned: {first_name} at {address.split(',')[0]} "
-                         f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - {reason}. "
-                         "Conflict? Reply fast.")
-
-        if dry_run():
-            ledger.write_shadow(thread_id, f"booked__pending_{message_id}", {
-                "would_calendar": {"create": True, "start": start_az.isoformat(),
-                                   "agent": agent["name"], "same_day": same_day,
-                                   "jace_cover": jace_cover},
-                "would_body": T.booking_confirmation(first_name, address,
-                                                     when_human, agent["name"]),
-                "would_poke": jace_ping,
-            })
-            return "shadowed"
-
-        stage_probe = f"reply__{message_id}"
-        verdict = ledger.reserve_send(thread_id, stage_probe,
-                                      {"template": "booking_new"})
-        if verdict in ("already-sent", "in-flight"):
-            return f"skipped:{verdict}"
-        if verdict == "recover":
-            msgs = gm.fetch_thread(thread_id)
-            if gm.alex_replied_after(msgs, message_id):
-                ledger.mark_sent(thread_id, stage_probe, recovered="backfilled")
-                return "skipped:recovered"
-            if not ledger.takeover_send(thread_id, stage_probe):
-                return "skipped:takeover-lost"
-
-        body = T.booking_confirmation(first_name, address, when_human,
-                                      agent["name"])
-        ok, why = review_gate(thread_id, body, "booking_new")
-        if not ok:
-            ledger.mark_failed(thread_id, stage_probe, f"review-blocked: {why}")
-            _escalate_review_block(thread_id, why, "booking_new")
-            return "no-send:review-blocked"
-        try:
-            event_id = cal.create_showing_event(address, first_name, start_az, agent)
-        except Exception as e:  # noqa: BLE001
-            ledger.mark_failed(thread_id, stage_probe, f"create_event: {e}")
-            return "skipped:event-failed"
-        try:
-            gm.send_reply(thread_id, relay, body)
-        except Exception as e:  # noqa: BLE001
-            ledger.mark_failed(thread_id, stage_probe, f"send-after-event: {e} "
-                               f"event_id={event_id}")
-            return "skipped:send-failed-event-created"
-        ledger.mark_sent(thread_id, stage_probe, event_id=event_id)
-        try:
-            gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
-        except Exception as e:  # noqa: BLE001
-            ledger.set_labels_pending(thread_id, stage_probe,
-                                      [HANDLED_LABEL], [AWAITING_LABEL])
-            log.error("label failed after booking: %s", e)
-        ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
-                          booked_start_iso=start_az.isoformat(), agent=agent["name"])
-        # Booked FYI on EVERY booking (Alex 2026-08-23: v2 only pinged cover
-        # assignments; regular bookings reached the calendar but never his
-        # phone). Cover bookings keep the urgent reply-fast copy.
-        try:
-            gm.poke_ping(jace_ping or (
-                f"Booked: {first_name} - {address.split(',')[0]} - "
-                f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} with "
-                f"{agent['name'].split()[0]}. [FYI]"))
-        except Exception as e:  # noqa: BLE001
-            log.error("booked FYI ping failed: %s", e)
-        return "sent"
+    # Nothing they asked for can be booked. The days they named, in order.
+    days = []
+    for d in [i["date"] for i in items] + [
+            _cand_date(c) for c in (cls or {}).get("time_candidates") or []]:
+        if d is not None and d >= now_az.date() and d not in days:
+            days.append(d)
+    reason = _reason_line(items, failures)
 
     # CONSOLIDATE BEFORE COUNTERING (Alex 2026-11-04, Kylinn/Marigold: asked
     # for 4:00 today at 2:17pm, too little notice, while a 5:30 showing sat on
@@ -1021,36 +1298,26 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
     # time can't work but the house already has a showing on the day they
     # asked for, offer that showing before any list of open times. Once only:
     # an earlier offer means they already heard about it.
-    cf = _renter_facts(doc, cls)
-    already_offered = (doc or {}).get("last_reply_template") in OFFER_TEMPLATES
-    asked = []
-    for cand in cls.get("time_candidates", []):
-        try:
-            h, m = map(int, cand["time"].split(":"))
-            y, mo, d = map(int, cand["date"].split("-"))
-            asked.append(datetime(y, mo, d, h, m, tzinfo=AZ_TZ))
-        except (KeyError, ValueError, TypeError, AttributeError):
-            continue
-    if asked and not already_offered:
-        days = {a.date() for a in asked}
+    if items and days and not already_offered:
         try:
             hits = [hh for hh in cal.find_existing_showings(
                         address, events=events, min_lead_hours=1, limit=10)
                     if hh["start_az"].date() in days
                     and cal.slot_acceptable_to_renter(hh["start_az"],
-                                                      cf["declined_iso"],
-                                                      cf["earliest_daily"],
-                                                      cf["latest_daily"])]
+                                                      rf["declined_iso"],
+                                                      rf["earliest_daily"],
+                                                      rf["latest_daily"])]
         except Exception as e:  # noqa: BLE001
             log.error("existing-showing lookup before counter failed: %s", e)
             hits = []
         if hits:
             near = hits[0]
             result = send_stage(
-                thread_id, f"reply__{message_id}", relay,
-                T.counter_existing(first_name, address,
-                                   cal.fmt_showing_time(asked[0]),
-                                   near["when_human"]),
+                thread_id, stage, relay,
+                _with_lead(T.counter_existing(first_name, address,
+                                              _asked_when(items[0]),
+                                              near["when_human"],
+                                              reason=reason), lead),
                 [AWAITING_LABEL], [], {"template": "counter_existing"}, message_id)
             if result == "sent":
                 ledger.transition(thread_id, ledger.OFFERED,
@@ -1058,26 +1325,211 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                                   offered_event_id=(near["event"] or {}).get("id"))
             return result
 
-    # No candidate survived validation -> counter with nearest valid slots.
+    # Counter with real open times ON THE DAY THEY ASKED first (2026-11-05/06:
+    # Sunday and "Saturday 3:30" asks got Monday/Tuesday times "without
+    # explaining why", and the review blocked them), then the nearest anywhere.
+    # Times we pick stay Alex-only.
+    slots = []
     try:
-        slots = cal.counter_slots(address, events, now_az=now_az,
-                                  declined_iso=cf["declined_iso"],
-                                  earliest_daily=cf["earliest_daily"],
-                                  latest_daily=cf["latest_daily"])
+        kw = dict(now_az=now_az, declined_iso=rf["declined_iso"],
+                  earliest_daily=rf["earliest_daily"],
+                  latest_daily=rf["latest_daily"])
+        per_day = 2 if len(days) == 1 else 1
+        for d in days:
+            slots += cal.counter_slots(address, events, count=per_day,
+                                       only_dates={d}, **kw)
+            if len(slots) >= 2:
+                break
+        slots = slots[:2]
+        if not slots:
+            slots = cal.counter_slots(address, events, **kw)
     except Exception as e:  # noqa: BLE001
         log.error("counter_slots failed: %s", e)
         slots = []
     if not slots:
         needs_human(thread_id, first_name, address, "no valid slots to counter")
         return "no-send:needs-human"
-    result = send_stage(thread_id, f"reply__{message_id}", relay,
-                      T.counter_proposal(first_name,
-                                         [cal.fmt_showing_time(s) for s in slots]),
-                      [AWAITING_LABEL], [], {"template": "counter"}, message_id)
+    if reason is None and days and not any(s.date() in days for s in slots):
+        reason = _day_reason(days[0], now_az)
+    result = send_stage(thread_id, stage, relay,
+                        _with_lead(T.counter_proposal(
+                            first_name, [cal.fmt_showing_time(s) for s in slots],
+                            reason=reason), lead),
+                        [AWAITING_LABEL], [], {"template": "counter"}, message_id)
     if result == "sent":
         ledger.upsert_thread(thread_id,
                              proposed_slots_iso=[c.isoformat() for c in slots])
     return result
+
+
+def _book_valid_slot(thread_id, doc, first_name, address, relay, start_az, v,
+                     events, message_id, stage, lead="") -> str:
+    """A validated slot: snap to a showing minutes away, or create the event
+    and confirm (event FIRST, then the email, then labels, then the FYI)."""
+    if _newer_renter_message_exists(thread_id, message_id):
+        needs_human(thread_id, first_name, address,
+                    "renter sent another message while this one was "
+                    "being processed - book by hand", urgent=True)
+        return "no-send:superseded-by-newer-message"
+
+    # ADJACENCY SNAP (Alex 2026-08-30: "we always try and consolidate").
+    # T booked 5pm and Schneider 6pm at the same house minutes apart
+    # because consolidate-ONCE was already spent on both threads. When the
+    # renter's own valid proposal lands within an hour of an existing
+    # same-house showing, the existing slot gets offered ONE more time,
+    # framed as convenience and triggered only by their proposal - once
+    # per thread, so the Alec repeat-push pattern cannot come back.
+    # Within five minutes of the existing slot there is nothing left to
+    # negotiate: fold them straight in and confirm the existing time.
+    if not (doc or {}).get("snap_offered") and not dry_run():
+        near = None
+        for hit in cal.find_existing_showings(address, events=events,
+                                              limit=4):
+            if abs((hit["start_az"] - start_az).total_seconds()) <= 3600:
+                near = hit
+                break
+        if near:
+            ev_id = near["event"].get("id", "")
+            diff_s = abs((near["start_az"] - start_az).total_seconds())
+            stage_probe = stage
+            if diff_s <= 300:
+                verdict = ledger.reserve_send(
+                    thread_id, stage_probe, {"template": "booking_fold_snap"})
+                if verdict in ("already-sent", "in-flight"):
+                    return f"skipped:{verdict}"
+                if verdict == "recover":
+                    msgs2 = gm.fetch_thread(thread_id)
+                    if gm.alex_replied_after(msgs2, message_id):
+                        ledger.mark_sent(thread_id, stage_probe,
+                                         recovered="backfilled")
+                        return "skipped:recovered"
+                    if not ledger.takeover_send(thread_id, stage_probe):
+                        return "skipped:takeover-lost"
+                agent_name = cal.agent_name_from_event(near["event"])
+                body = _with_lead(T.booking_confirmation(
+                    first_name, address, near["when_human"], agent_name), lead)
+                ok, why = review_gate(thread_id, body, "booking_fold_snap")
+                if not ok:
+                    ledger.mark_failed(thread_id, stage_probe,
+                                       f"review-blocked: {why}")
+                    _escalate_review_block(thread_id, why, "booking_fold_snap")
+                    return "no-send:review-blocked"
+                try:
+                    cal.fold_renter_into_event(near["event"], first_name)
+                except Exception as e:  # noqa: BLE001
+                    ledger.mark_failed(thread_id, stage_probe, f"fold: {e}")
+                    return "skipped:event-failed"
+                try:
+                    gm.send_reply(thread_id, relay, body)
+                except Exception as e:  # noqa: BLE001
+                    ledger.mark_failed(thread_id, stage_probe,
+                                       f"send-after-fold: {e} event_id={ev_id}")
+                    return "skipped:send-failed-event-created"
+                ledger.mark_sent(thread_id, stage_probe, event_id=ev_id)
+                ledger.transition(thread_id, ledger.BOOKED, event_id=ev_id,
+                                  snap_offered=True)
+                try:
+                    gm.modify_labels(thread_id, [HANDLED_LABEL],
+                                     [AWAITING_LABEL])
+                except Exception as e:  # noqa: BLE001
+                    ledger.set_labels_pending(thread_id, stage_probe,
+                                              [HANDLED_LABEL],
+                                              [AWAITING_LABEL])
+                    log.error("label failed after snap fold: %s", e)
+                try:
+                    gm.poke_ping(
+                        f"Booked (joined existing): {first_name} - "
+                        f"{address.split(',')[0]} - {near['when_human']}. [FYI]")
+                except Exception as e:  # noqa: BLE001
+                    log.error("snap fold FYI ping failed: %s", e)
+                return "sent"
+            their_when = cal.fmt_showing_time(start_az)
+            result = send_stage(
+                thread_id, stage_probe, relay,
+                _with_lead(T.snap_offer(first_name, address,
+                                        near["when_human"], their_when), lead),
+                [AWAITING_LABEL], [], {"template": "offer_existing_snap"},
+                message_id)
+            if result == "sent":
+                ledger.transition(
+                    thread_id, ledger.OFFERED,
+                    offered_start_iso=near["start_az"].isoformat(),
+                    offered_event_id=ev_id,
+                    snap_offered=True)
+            return result
+
+    agent, same_day = v["agent"], v["same_day"]
+    jace_cover = v.get("jace_cover")
+    when_human = cal.fmt_showing_time(start_az)
+    jace_ping = None
+    if same_day or jace_cover:
+        reason = ("Alex busy" if jace_cover else "same-day")
+        jace_ping = (f"{agent['name'].split()[0]} assigned: {first_name} at {address.split(',')[0]} "
+                     f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - {reason}. "
+                     "Conflict? Reply fast.")
+
+    if dry_run():
+        ledger.write_shadow(thread_id, f"booked__pending_{message_id}", {
+            "would_calendar": {"create": True, "start": start_az.isoformat(),
+                               "agent": agent["name"], "same_day": same_day,
+                               "jace_cover": jace_cover},
+            "would_body": _with_lead(T.booking_confirmation(
+                first_name, address, when_human, agent["name"]), lead),
+            "would_poke": jace_ping,
+        })
+        return "shadowed"
+
+    stage_probe = stage
+    verdict = ledger.reserve_send(thread_id, stage_probe,
+                                  {"template": "booking_new"})
+    if verdict in ("already-sent", "in-flight"):
+        return f"skipped:{verdict}"
+    if verdict == "recover":
+        msgs = gm.fetch_thread(thread_id)
+        if gm.alex_replied_after(msgs, message_id):
+            ledger.mark_sent(thread_id, stage_probe, recovered="backfilled")
+            return "skipped:recovered"
+        if not ledger.takeover_send(thread_id, stage_probe):
+            return "skipped:takeover-lost"
+
+    body = _with_lead(T.booking_confirmation(first_name, address, when_human,
+                                             agent["name"]), lead)
+    ok, why = review_gate(thread_id, body, "booking_new")
+    if not ok:
+        ledger.mark_failed(thread_id, stage_probe, f"review-blocked: {why}")
+        _escalate_review_block(thread_id, why, "booking_new")
+        return "no-send:review-blocked"
+    try:
+        event_id = cal.create_showing_event(address, first_name, start_az, agent)
+    except Exception as e:  # noqa: BLE001
+        ledger.mark_failed(thread_id, stage_probe, f"create_event: {e}")
+        return "skipped:event-failed"
+    try:
+        gm.send_reply(thread_id, relay, body)
+    except Exception as e:  # noqa: BLE001
+        ledger.mark_failed(thread_id, stage_probe, f"send-after-event: {e} "
+                           f"event_id={event_id}")
+        return "skipped:send-failed-event-created"
+    ledger.mark_sent(thread_id, stage_probe, event_id=event_id)
+    try:
+        gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
+    except Exception as e:  # noqa: BLE001
+        ledger.set_labels_pending(thread_id, stage_probe,
+                                  [HANDLED_LABEL], [AWAITING_LABEL])
+        log.error("label failed after booking: %s", e)
+    ledger.transition(thread_id, ledger.BOOKED, event_id=event_id,
+                      booked_start_iso=start_az.isoformat(), agent=agent["name"])
+    # Booked FYI on EVERY booking (Alex 2026-08-23: v2 only pinged cover
+    # assignments; regular bookings reached the calendar but never his
+    # phone). Cover bookings keep the urgent reply-fast copy.
+    try:
+        gm.poke_ping(jace_ping or (
+            f"Booked: {first_name} - {address.split(',')[0]} - "
+            f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} with "
+            f"{agent['name'].split()[0]}. [FYI]"))
+    except Exception as e:  # noqa: BLE001
+        log.error("booked FYI ping failed: %s", e)
+    return "sent"
 
 
 def handle_cancellation(thread_id, doc, first_name, relay, message_id,
