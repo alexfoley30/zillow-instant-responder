@@ -220,6 +220,19 @@ _CLOCK_TIME = re.compile(
     r"|\bbefore \d{1,2}\b|\bbetween \d{1,2}", re.I)
 
 
+_DAY_WORD = re.compile(
+    r"\b(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?s?\b"
+    r"|\b(?:today|tonight|tomorrow|weekend)\b", re.I)
+
+
+def has_schedule_hint(text: str) -> bool:
+    """True when a message names a day or a clock time, so it is worth reading
+    for a tour time (2026-11-08: first messages that gave a day and window
+    were never read for one)."""
+    t = text or ""
+    return bool(_DAY_WORD.search(t) or _CLOCK_TIME.search(t))
+
+
 def named_day_without_time(text: str):
     """The one weekday a first message names when it gives no clock time,
     e.g. 'I'd love to tour on Monday if there is availability' -> 'Monday'.
