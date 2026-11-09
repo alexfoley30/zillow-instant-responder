@@ -20,7 +20,7 @@ def _ev(summary, start, end, location=""):
 
 def test_same_day_books_alex_not_rhett():
     start = datetime(2026, 10, 26, 14, 0, tzinfo=AZ)
-    assert rules.pick_agent(start, NOW) == rules.ALEX
+    assert rules.pick_agent() == rules.ALEX
     v = cal.validate_slot(start, ADDR, [], now_az=NOW)
     assert v["ok"] and v["agent"] == rules.ALEX and v["same_day"]
     assert v["jace_cover"] is None
@@ -32,8 +32,7 @@ def test_next_day_books_alex():
 
 
 def test_thread_override_still_wins():
-    start = datetime(2026, 10, 26, 14, 0, tzinfo=AZ)
-    assert rules.pick_agent(start, NOW, "jace") == rules.JACE
+    assert rules.pick_agent("jace") == rules.JACE
 
 
 def test_busy_alex_is_not_free_same_day():
