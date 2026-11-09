@@ -1175,12 +1175,9 @@ def _offer_times(thread_id, doc, first_name, address, relay, cls, renter_text,
         log.error("offer counter_slots failed: %s", e)
     if not cand:
         return None
+    # No Poke when today is full: the reply offers the next openings and the
+    # renter picks one (Alex 2026-11-08: "kill the today poke").
     today_missed = wants_today and cand[0].date() != now_az.date()
-    if today_missed:
-        needs_human(thread_id, first_name, address,
-                    f"wants TODAY, earliest bookable is "
-                    f"{cal.fmt_showing_time(cand[0])}: {renter_text[:60]}",
-                    urgent=True)
     reason = None
     if named_dates and not today_missed and not any(
             c.date() in named_dates for c in cand):

@@ -49,7 +49,10 @@ _RULES = [
     # inside "address"/"additional" in relay boilerplate and misfired on 8 of 12
     # new inquiries during the 7/30-8/1 shadow soak.
     ("as_is", re.compile(
-        r"\b(install|add|put in|replace|swap|change out|paint|turf|fence in)\b|"
+        r"\b(install|add|put in|replace|swap|change out|turf|fence in)\b|"
+        # "lead paint" / "lead-based paint" is a disclosure question, not a
+        # repaint request (Alex 2026-11-08).
+        r"(?<!lead )(?<!lead-)(?<!lead based )(?<!lead-based )\bpaint\b|"
         r"can you (fix|update|upgrade)", re.IGNORECASE)),
     # approval requirements: blanket 3x-income answer (Alex 2026-08-05, Daliana)
     ("requirements", re.compile(
