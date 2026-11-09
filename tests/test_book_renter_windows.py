@@ -60,7 +60,7 @@ def _wire(monkeypatch, now, cls_by_text, events=(), reviews=(), msgs=()):
         def now(cls, tz=None):
             return now
 
-    def classify(text, last_alex, now_phx, transcript=None):
+    def classify(text, now_phx, transcript=None):
         for key, cls in cls_by_text.items():
             if key in (text or ""):
                 return copy.deepcopy(cls)

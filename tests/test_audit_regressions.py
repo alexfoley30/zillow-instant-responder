@@ -378,7 +378,8 @@ def test_counter_slots_respect_daily_bound():
 
 def test_classify_fallback_carries_convo_fields():
     import llm
-    out = llm.classify_reply("random text", "", datetime(2026, 8, 25, 9, 0))
+    out = llm.classify_reply("random text", datetime(2026, 8, 25, 9, 0),
+                             transcript="RENTER: random text")
     for k in ("constraints", "earliest_daily", "latest_daily",
               "declined_times", "cancel_reason"):
         assert k in out, k

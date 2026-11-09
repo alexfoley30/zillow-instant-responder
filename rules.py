@@ -195,10 +195,12 @@ def away_block_status(events_that_day: list) -> str:
 
 # ---------------------------------------------------------------- agent pick
 
-def pick_agent(start_az: datetime, now_az: datetime, thread_override: str | None = None) -> dict:
-    """ALEX first for every showing, same-day included (2026-10-25). When Alex
+def pick_agent(thread_override: str | None = None) -> dict:
+    """ALEX for every showing, same-day included (2026-10-25). When Alex
     can't make a renter's own time, calendar_logic.validate_slot hands it to
-    JACE, then RHETT (2026-11-04). A thread-level override ('have Jace cover') still wins."""
+    JACE, then RHETT (2026-11-04). A thread-level override ('have Jace cover')
+    still wins. The old same-day/time-of-day rotation is gone, so the slot
+    start and the current time are no longer consulted here."""
     if thread_override and thread_override.lower() in AGENTS:
         return AGENTS[thread_override.lower()]
     return ALEX

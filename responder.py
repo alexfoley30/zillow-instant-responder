@@ -367,7 +367,7 @@ def _classify_first_message(text: str, now_az):
     if not rules.has_schedule_hint(text):
         return None
     try:
-        cls = llm.classify_reply(text, "", now_az, transcript=f"RENTER: {text}")
+        cls = llm.classify_reply(text, now_az, transcript=f"RENTER: {text}")
     except Exception as e:  # noqa: BLE001 - never block the instant reply
         log.error("first-message classify failed: %s", e)
         return None
@@ -598,10 +598,9 @@ def _handle_reply(thread_id, doc, msgs, renter_text, message_id, ctx) -> str:
         return handle_alex_owned_reply(thread_id, doc, msgs, renter_text,
                                        message_id)
 
-    last_alex = next((gm.msg_body(m) for m in reversed(msgs) if gm.is_from_alex(m)), "")
     now_az = datetime.now(AZ_TZ)
     cls = rules.snap_weekday_dates(
-        llm.classify_reply(renter_text, last_alex, now_az,
+        llm.classify_reply(renter_text, now_az,
                            transcript=gm.thread_transcript(msgs)), now_az)
     ctx.update(first_name=first_name, address=address, relay=relay, cls=cls,
                now_az=now_az)
@@ -1610,9 +1609,8 @@ def handle_alex_owned_reply(thread_id, doc, msgs, renter_text, message_id) -> st
     event_id = doc.get("event_id")
     if not event_id and doc.get("state") != ledger.BOOKED:
         return "skipped:alex-owned"
-    last_alex = next((gm.msg_body(m) for m in reversed(msgs) if gm.is_from_alex(m)), "")
     cls = rules.snap_weekday_dates(
-        llm.classify_reply(renter_text, last_alex, datetime.now(AZ_TZ),
+        llm.classify_reply(renter_text, datetime.now(AZ_TZ),
                            transcript=gm.thread_transcript(msgs)),
         datetime.now(AZ_TZ))
     if cls["intent"] != "cancellation":

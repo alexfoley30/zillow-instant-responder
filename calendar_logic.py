@@ -259,7 +259,7 @@ def validate_slot(start_az: datetime, address: str, events: list,
                     "fold": existing}
 
     same_day = rules.is_same_day(start_az, now_az)
-    agent = rules.pick_agent(start_az, now_az)
+    agent = rules.pick_agent()
 
     # ALEX FIRST, THEN JACE, THEN RHETT (Alex 2026-11-04: "the responder is
     # almost never booking appointments anymore", "if my calendar is booked we

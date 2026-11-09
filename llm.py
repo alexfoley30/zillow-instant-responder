@@ -164,16 +164,14 @@ _CONVO_DEFAULTS = {"constraints": [], "earliest_daily": None,
                    "latest_daily": None, "declined_times": []}
 
 
-def classify_reply(renter_text: str, last_alex: str, now_phx: datetime,
-                   transcript: str = None) -> dict:
+def classify_reply(renter_text: str, now_phx: datetime,
+                   transcript: str) -> dict:
     """Haiku first, regex fallback. Result always matches SCHEMA's shape
     (plus `_fallback: True` when the regex path produced it). `transcript`
-    is the full conversation (2026-08-25: the model reads the WHOLE thread,
-    so constraints and declined slots survive across messages); callers
-    that pass none get the legacy last-exchange context."""
-    if transcript is None:
-        transcript = (f"US: {last_alex or '(none)'}\n"
-                      f"RENTER: {renter_text or ''}")
+    is the full conversation and is REQUIRED: the model reads the WHOLE
+    thread so constraints and declined slots survive across messages
+    (2026-08-25). The last-exchange-only context it replaced is gone -
+    every caller has passed a transcript since that change shipped."""
     result = _api_call(renter_text, transcript, now_phx)
     if result is None:
         result = _regex_classify(renter_text, now_phx)
