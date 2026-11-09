@@ -64,6 +64,14 @@ def _ev_end(ev: dict) -> datetime | None:
         return None
 
 
+def _declined_by_me(ev: dict) -> bool:
+    """Alex said no to it, so it does not block him. Natalie 2026-11-08: his
+    sister's custody blocks ("Cloonan Kids with Dad/Mom", declined, two days
+    each) made Monday and Wednesday read as booked up while both were open."""
+    return any(a.get("self") and a.get("responseStatus") == "declined"
+               for a in ev.get("attendees") or [])
+
+
 def _ev_all_day_covers(ev: dict, day) -> bool:
     """All-day events carry start.date (no dateTime). End date is exclusive."""
     raw = (ev.get("start") or {}).get("date")
@@ -206,12 +214,21 @@ def validate_slot(start_az: datetime, address: str, events: list,
     # All-day events now count toward the day (so away blocks finally register);
     # the timed-overlap checks below skip them naturally (_ev_start is None).
     day_events = []
+    day = start_az.date()
     for ev in events:
+        if _declined_by_me(ev):
+            continue
         s = _ev_start(ev)
         if s is not None:
-            if s.astimezone(AZ_TZ).date() == start_az.date():
+            # A timed event can run for days (the "Cloonan Kids with Dad"
+            # family block is Mon 8am to Wed 8am); it counts on every day it
+            # touches, not just the day it starts.
+            e = _ev_end(ev) or s
+            s_day = s.astimezone(AZ_TZ).date()
+            e_day = (e - timedelta(microseconds=1)).astimezone(AZ_TZ).date()
+            if s_day <= day <= max(s_day, e_day):
                 day_events.append(ev)
-        elif _ev_all_day_covers(ev, start_az.date()):
+        elif _ev_all_day_covers(ev, day):
             day_events.append(ev)
 
     # Away block applies to every candidate day.
