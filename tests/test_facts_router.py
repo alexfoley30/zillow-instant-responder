@@ -126,3 +126,13 @@ def test_later_move_in_is_not_move_in_now():
     assert rule("our move in date wouldn't be until early December. Would that "
                 "work for this current unit at all?") != "move_in_now"
     assert "Great question" not in facts.ANSWER_LINES["move_in_now"]
+
+
+def test_as_is_not_fooled_by_lead_paint():
+    # 2026-11-08: a lead paint disclosure question got the as-is reply.
+    for q in ("Is there any lead paint in the home?",
+              "Was the house tested for lead-based paint?",
+              "Any lead based paint disclosure?",
+              "Does it have lead-paint?"):
+        assert rule(q) != "as_is", q
+    assert rule("Can we paint the bedroom?") == "as_is"

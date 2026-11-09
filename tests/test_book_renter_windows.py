@@ -369,3 +369,17 @@ def test_window_ignores_a_same_house_showing_outside_the_window(monkeypatch):
                                   "m9") == "sent"
     assert calls["created"] == [(datetime(wed.year, wed.month, wed.day, 14, 0,
                                           tzinfo=AZ), "Alex Foley")]
+
+
+# ------------------------------------------------- today is full: no Poke
+
+def test_wants_today_when_full_offers_times_without_a_poke(monkeypatch):
+    # Alex 2026-11-08: "kill the today poke". 7pm Sunday, nothing left today.
+    sun_7pm = datetime(2026, 11, 8, 19, 0, tzinfo=AZ)
+    calls = _wire(monkeypatch, sun_7pm, {})
+    out = responder._offer_times(
+        "t1", {}, "TJ", ADDR, RELAY, _cls("vague_time", [], same_day=True),
+        "can I see it today?", "m1", sun_7pm, [], wants_today=True)
+    assert out == "sent"
+    assert calls["nh"] == [] and calls["pings"] == []
+    assert len(calls["replies"]) == 1
