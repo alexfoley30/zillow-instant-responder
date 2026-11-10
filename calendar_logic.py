@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 
 import ledger
 import rules
+from aztime import day_and_time as fmt_showing_time  # noqa: F401 re-export
+from aztime import iso_utc, to_az
 from gmail_client import composio_execute
 
 log = logging.getLogger("zillow-instant.calendar")
@@ -18,16 +20,12 @@ log = logging.getLogger("zillow-instant.calendar")
 AZ_TZ = rules.AZ_TZ
 
 
-def _iso_utc(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def list_events(days: int = 7, time_min: datetime = None) -> list:
     now = time_min or datetime.now(timezone.utc)
     res = composio_execute("GOOGLECALENDAR_EVENTS_LIST", {
         "calendarId": "primary",
-        "timeMin": _iso_utc(now),
-        "timeMax": _iso_utc(now + timedelta(days=days)),
+        "timeMin": iso_utc(now),
+        "timeMax": iso_utc(now + timedelta(days=days)),
         "singleEvents": True,
         "orderBy": "startTime",
         "maxResults": 100,
@@ -86,17 +84,6 @@ def _ev_all_day_covers(ev: dict, day) -> bool:
     return s <= day < e
 
 
-def fmt_showing_time(start_az: datetime) -> str:
-    """'Wednesday, July 8, at 6:30 PM' with today/tomorrow prefix when true."""
-    now_az = datetime.now(AZ_TZ)
-    day = start_az.strftime("%A, %B %-d")
-    if start_az.date() == now_az.date():
-        day = f"today, {day}"
-    elif start_az.date() == (now_az + timedelta(days=1)).date():
-        day = f"tomorrow, {day}"
-    return f"{day}, at {start_az.strftime('%-I:%M %p')}"
-
-
 def find_existing_showings(address: str, events: list = None,
                            min_lead_hours: float = 2.0, limit: int = 2) -> list:
     """CONSOLIDATE FIRST: all upcoming showings at THIS house (same street
@@ -152,9 +139,7 @@ def slot_acceptable_to_renter(start_az: datetime, declined_iso: list = None,
         return False
     for iso in declined_iso or []:
         try:
-            d = datetime.fromisoformat(iso)
-            if d.tzinfo is None:
-                d = d.replace(tzinfo=AZ_TZ)
+            d = to_az(datetime.fromisoformat(iso), naive="az")
             if abs((d - start_az).total_seconds()) <= 900:
                 return False
         except (ValueError, TypeError):
