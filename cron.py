@@ -17,6 +17,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+import aztime
 import calendar_logic as cal
 import gmail_client as gm
 import ledger
@@ -215,14 +216,6 @@ def reminder_due(start_az, now_az, booked_at_az=None):
     return None
 
 
-def _as_az(dt):
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(rules.AZ_TZ)
-
-
 def _showing_reminders():
     """Ask every booked renter whether their tour still works - once the
     evening before, once about two hours out (Alex 2026-08-29: an agent
@@ -284,13 +277,15 @@ def _showing_reminders():
                         "no reminder possible", thread_id, event_id)
             continue
         try:
-            start_az = datetime.fromisoformat(raw_start).astimezone(rules.AZ_TZ)
+            start_az = aztime.to_az(datetime.fromisoformat(raw_start),
+                                    naive="az")
         except Exception as e:  # noqa: BLE001
             log.error("bad booked_start_iso on %s (%r): %s", thread_id, raw_start, e)
             continue
 
         which = reminder_due(start_az, now_az,
-                             _as_az(doc.get("last_action_at")))
+                             aztime.to_az(doc.get("last_action_at"),
+                                          naive="utc"))
         if not which:
             continue
 
