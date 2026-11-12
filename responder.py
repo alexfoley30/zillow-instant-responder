@@ -988,9 +988,19 @@ def _reason_line(items: list, failures: list) -> str | None:
     if all(r == "past" for r in why):
         return f"{when[0].upper()}{when[1:]} has already passed."
     if first["kind"] == "exact" and "out-of-window" in why:
-        return (f"I only show homes on {_hours_line(first['date'])} (Arizona "
-                f"time), so {first['slots'][0].strftime('%-I:%M %p')} falls "
-                "outside that.")
+        # Name the last START time, not the window close: "Fridays from 10:00
+        # AM to 6:30 PM, so 6:30 PM falls outside that" contradicted itself
+        # and the review blocked it (Marcus, Willetta, 2026-11-11).
+        asked = first["slots"][0]
+        lo, hi = rules.SHOWING_WINDOWS[asked.weekday()]
+        day = asked.strftime("%A")
+        if asked.time() < lo:
+            return (f"My first tour on {day}s starts at {_clock(lo)} (Arizona "
+                    f"time), so {_clock(asked)} is a little early.")
+        last = (datetime.combine(asked.date(), hi)
+                - timedelta(minutes=rules.SHOWING_MINUTES))
+        return (f"My last tour on {day}s starts at {_clock(last)} (Arizona "
+                f"time), so {_clock(asked)} is past that.")
     if all(r in ("too-soon", "past") for r in why):
         return ("I need about two hours' notice to get someone out there, so "
                 f"{when} is too soon.")
@@ -998,6 +1008,16 @@ def _reason_line(items: list, failures: list) -> str | None:
            for r in why):
         return None
     return f"{when[0].upper()}{when[1:]} is already booked up on my end."
+
+
+def _weekday_evening(item: dict) -> bool:
+    """An exact Mon-Fri ask at or past that day's last tour start."""
+    if item["kind"] != "exact":
+        return False
+    asked = item["slots"][0]
+    lo, _ = rules.SHOWING_WINDOWS[asked.weekday()]
+    return (asked.weekday() < 5 and asked.time() >= lo
+            and not rules.in_window(asked))
 
 
 def _day_reason(d, now_az) -> str | None:
@@ -1331,13 +1351,28 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         kw = dict(now_az=now_az, declined_iso=rf["declined_iso"],
                   earliest_daily=rf["earliest_daily"],
                   latest_daily=rf["latest_daily"])
-        per_day = 2 if len(days) == 1 else 1
-        for d in days:
-            slots += cal.counter_slots(address, events, count=per_day,
-                                       only_dates={d}, **kw)
-            if len(slots) >= 2:
-                break
-        slots = slots[:2]
+        late = items[0]["date"] if items and _weekday_evening(items[0]) else None
+        if late:
+            # A weekday time past closing moves to the next day, latest open
+            # times first; that day's morning is no use to someone asking for
+            # the evening (Marcus 2026-11-11, "Friday at 630pm" at Willetta;
+            # Alex: "That's outside my window why aren't we pushing for
+            # Saturday"). Weekend asks keep their own day (Crystal 11/6).
+            for k in range(1, 8):
+                got = cal.counter_slots(address, events, count=48,
+                                        only_dates={late + timedelta(days=k)},
+                                        **kw)
+                if got:
+                    slots = got[-2:]
+                    break
+        else:
+            per_day = 2 if len(days) == 1 else 1
+            for d in days:
+                slots += cal.counter_slots(address, events, count=per_day,
+                                           only_dates={d}, **kw)
+                if len(slots) >= 2:
+                    break
+            slots = slots[:2]
         if not slots:
             slots = cal.counter_slots(address, events, **kw)
     except Exception as e:  # noqa: BLE001
