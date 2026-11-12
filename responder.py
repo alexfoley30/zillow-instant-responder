@@ -1353,17 +1353,16 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
                   latest_daily=rf["latest_daily"])
         late = items[0]["date"] if items and _weekday_evening(items[0]) else None
         if late:
-            # A weekday time past closing moves to the next day, latest open
-            # times first; that day's morning is no use to someone asking for
-            # the evening (Marcus 2026-11-11, "Friday at 630pm" at Willetta;
-            # Alex: "That's outside my window why aren't we pushing for
-            # Saturday"). Weekend asks keep their own day (Crystal 11/6).
-            for k in range(1, 8):
-                got = cal.counter_slots(address, events, count=48,
-                                        only_dates={late + timedelta(days=k)},
-                                        **kw)
-                if got:
-                    slots = got[-2:]
+            # A weekday time past closing gets that week's Saturday (Sunday if
+            # Saturday is full); a weekday morning is no use to someone asking
+            # for the evening (Marcus 2026-11-11, "Friday at 630pm" at
+            # Willetta; Alex: "why aren't we pushing for Saturday", "Should be
+            # automatic. Offer Saturday"). Weekend asks keep their own day
+            # (Crystal 11/6).
+            sat = late + timedelta(days=5 - late.weekday())
+            for d in (sat, sat + timedelta(days=1)):
+                slots = cal.counter_slots(address, events, only_dates={d}, **kw)
+                if slots:
                     break
         else:
             per_day = 2 if len(days) == 1 else 1
