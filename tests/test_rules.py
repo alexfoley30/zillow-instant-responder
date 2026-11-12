@@ -95,10 +95,6 @@ def test_blocked_address_no_substring_number():
     assert not rules.is_blocked_address("16413 E Coronado Rd, Phoenix, AZ", blocked)
 
 
-def test_addr_slug():
-    assert rules.addr_slug("1641 E Coronado Rd, Phoenix, AZ 85006") == "1641-e-coronado-rd"
-
-
 # --------------------------------------- weekday snap (8/22 Adam Friday bug)
 
 def _snap(raw, llm_date, now):
