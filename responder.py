@@ -166,8 +166,10 @@ def review_gate(thread_id: str, body: str, template: str,
     repeats an earlier send, or answers the wrong thing. FAILS OPEN - the
     deterministic guards still stand when the review can't run. Returns
     (ok, reason)."""
-    if template == "approved_answer":
-        return True, ""  # Alex's own words are never second-guessed
+    if template in ("approved_answer", "first_reply_fallback"):
+        # Alex's own words are never second-guessed; the fallback is a fixed
+        # thanks + application link with no claim to contradict.
+        return True, ""
     try:
         msgs = msgs or gm.fetch_thread(thread_id)
         transcript = gm.thread_transcript(msgs)
@@ -209,6 +211,11 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
                trigger_message_id: str = "") -> str:
     """The ONLY function that sends renter email. Wins the Firestore lock or
     does nothing. Returns 'sent' | 'shadowed' | 'skipped:<why>'."""
+    if (stage_key.startswith("first_reply") and T.APP_LINK not in body
+            and T.SIGNATURE in body):
+        # Alex 2026-11-12: "everyone gets an app, and a response, period".
+        # propose_times / counter / snap templates had no link.
+        body = body.replace(T.SIGNATURE, T.APP_LINE + "\n\n" + T.SIGNATURE, 1)
     meta = dict(meta)
     meta.update({
         "template": meta.get("template", stage_key),
@@ -380,6 +387,37 @@ def _classify_first_message(text: str, now_az):
 
 def handle_new_inquiry(thread_id: str, first_name: str, address: str,
                        relay: str, renter_text: str, message_id: str) -> str:
+    out = _new_inquiry_attempt(thread_id, first_name, address, relay,
+                               renter_text, message_id)
+    if not (out or "").startswith("no-send:") or out in (
+            "no-send:superseded-by-newer-message", "no-send:blocked-address"):
+        return out  # sent, or a newer message / leased home owns the reply
+    try:
+        if rules.is_blocked_address(address, ledger.blocked_addresses()):
+            return out
+    except Exception as e:  # noqa: BLE001
+        log.error("fallback blocked-address check failed %s: %s", thread_id, e)
+    # Aaliyah, 2026-11-11 (2701 E Willetta): asked for an application and a
+    # tour on Nov 16; the review blocked every reply and she heard nothing for
+    # a day. Alex 2026-11-12: "everyone gets an app, and a response, period".
+    # Whatever stopped the real reply (and Alex was already pinged for it),
+    # the renter still gets thanks + the application link.
+    try:
+        if not dry_run() and gm.alex_replied_after(gm.fetch_thread(thread_id),
+                                                   message_id):
+            return out
+    except Exception as e:  # noqa: BLE001 - fall through and send
+        log.error("fallback reply check failed %s: %s", thread_id, e)
+    result = send_stage(thread_id, "first_reply__fallback", relay,
+                        T.first_reply_fallback(first_name, address),
+                        [AWAITING_LABEL, NEEDS_REPLY_LABEL], [],
+                        {"template": "first_reply_fallback"}, message_id)
+    log.info("first-reply fallback %s after %s: %s", thread_id, out, result)
+    return result if result in ("sent", "shadowed") else out
+
+
+def _new_inquiry_attempt(thread_id, first_name, address, relay, renter_text,
+                         message_id) -> str:
     ctx = {}
     return _with_block_retry(
         lambda: _handle_new_inquiry(thread_id, first_name, address, relay,
@@ -630,7 +668,17 @@ def _handle_reply(thread_id, doc, msgs, renter_text, message_id, ctx) -> str:
     # closer ("Sounds good!") is the acceptance our own template asked for,
     # and a bare "okay thanks" is ambiguous - a human decides, urgently,
     # instead of the thread dying in silence.
-    if _CLOSER_RE.match(renter_text or "") and intent not in ("benign_closer",):
+    # Jericka, 2026-11-12 (2701 E Willetta): offered Saturday 11:00, she wrote
+    # "Sounds good!", the classifier called it benign_closer, and the old
+    # check skipped benign_closer entirely, so she was never booked. An
+    # affirmative closer to a live offer is a yes whatever the label; a
+    # booked thread's "perfect, thanks" stays a closer.
+    affirm_live = (intent == "benign_closer" and doc.get("state") != ledger.BOOKED
+                   and _CLOSER_RE.match(renter_text or "")
+                   and _AFFIRM_RE.search(renter_text or "")
+                   and _offer_is_live(doc, now_az))
+    if affirm_live or (_CLOSER_RE.match(renter_text or "")
+                       and intent not in ("benign_closer",)):
         if _offer_is_live(doc, now_az):
             if _AFFIRM_RE.search(renter_text or ""):
                 log.info("closer affirm w/ live offer %s: %r -> accept_offer",

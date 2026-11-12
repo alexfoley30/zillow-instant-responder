@@ -73,7 +73,11 @@ _RULES = [
     ("fair_housing", re.compile(
         r"(neighborhood safe|is it safe|crime|what are the neighbors|"
         r"good schools|school district (good|rating)|kind of people|"
-        r"demographic)", re.IGNORECASE)),
+        r"demographic|(area|neighborhood|part of town|community) (is )?safe|"
+        r"safe (area|neighborhood|part of town|community|place to live)|"
+        r"safe to live|(good|bad|nice|rough|sketchy) (area|neighborhood|part of town)|"
+        r"(is|how is|how's) (the|this|that) (area|neighborhood) "
+        r"(safe|good|bad|nice|rough|sketchy|okay|ok))", re.IGNORECASE)),
     # availability / earliest move-in: a home listed for rent is vacant "99.9%
     # of the time", so the answer is always "available now" (Alex 2026-11-04,
     # Sophia at Marigold: "when is the earliest move in date?"). Leased homes

@@ -35,6 +35,23 @@ def _lead_block(ack, answer):
     return QUESTION_ACK if ack else ""
 
 
+APP_LINE = f"You can start an application here whenever you're ready: {APP_LINK}"
+
+
+def first_reply_fallback(first_name, address):
+    """The first reply when the real one could not go out (review block,
+    calendar down, nothing bookable). Fixed text, no scheduling claims, so it
+    can't contradict the renter; Alex was pinged and follows up with times."""
+    return (
+        f"Hi {first_name},\n\n"
+        f"Thanks for reaching out about {address}! Here's the application "
+        f"whenever you're ready: {APP_LINK}\n\n"
+        "I'm checking the calendar for you now and will follow up with tour "
+        "times shortly.\n\n"
+        f"{SIGNATURE}"
+    )
+
+
 def _app_tail(answer):
     """The soft application line, unless the lead-in already gave the link."""
     if answer and APP_LINK in answer:
