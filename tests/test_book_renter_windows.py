@@ -194,10 +194,49 @@ def test_saturday_after_hours_counters_on_saturday_with_the_reason(monkeypatch):
                                  "your time", "m4")
     assert out == "sent"
     body = calls["replies"][0]
-    assert ("I only show homes on Saturdays from 10:00 AM to 2:00 PM "
-            "(Arizona time), so 3:30 PM falls outside that.") in body
+    assert ("My last tour on Saturdays starts at 1:30 PM (Arizona time), "
+            "so 3:30 PM is past that.") in body
     assert body.count("Saturday, November 7") == 2
     assert calls["nh"] == []
+
+
+def test_friday_evening_past_close_pushes_saturday(monkeypatch):
+    # Marcus 2026-11-11, Willetta: "I could do Friday at 630pm". The counter
+    # said 6:30 "falls outside" Fridays 10:00 AM to 6:30 PM, the review
+    # blocked the contradiction, and Alex asked why we weren't pushing Saturday.
+    now = datetime(2026, 11, 11, 20, 45, tzinfo=AZ)    # Wednesday night
+    cls = _cls("propose_time", [_cand("2026-11-13", "18:30",
+                                      raw="Friday at 630pm")])
+    calls = _wire(monkeypatch, now, {"Friday at 630pm": cls})
+    doc = {"renter_name": "Marcus", "property_address": ADDR,
+           "relay_email": RELAY, "last_reply_template": "availability_ask"}
+    out = responder.handle_reply("t-mv", doc, [], "hello, I was hoping to move "
+                                 "in by December 6th... I could do Friday at "
+                                 "630pm.", "m-mv")
+    assert out == "sent"
+    body = calls["replies"][0]
+    assert ("My last tour on Fridays starts at 6:00 PM (Arizona time), so "
+            "6:30 PM is past that.") in body
+    assert body.count("Saturday, November 14") == 2
+    assert "Friday, November 13" not in body
+    assert calls["created"] == [] and calls["nh"] == []
+
+
+def test_monday_evening_past_close_offers_saturday_then_sunday(monkeypatch):
+    now = datetime(2026, 11, 9, 9, 0, tzinfo=AZ)       # Monday morning
+    cls = _cls("propose_time", [_cand("2026-11-09", "19:00",
+                                      raw="tonight at 7")])
+    sat_off = {"summary": "Out of town", "start": {"date": "2026-11-14"},
+               "end": {"date": "2026-11-15"}}
+    calls = _wire(monkeypatch, now, {"tonight at 7": cls}, events=[sat_off])
+    doc = {"renter_name": "Jo", "property_address": ADDR,
+           "relay_email": RELAY, "last_reply_template": "availability_ask"}
+    assert responder.handle_reply("t-jo", doc, [], "Could I come tonight at "
+                                  "7?", "m-jo") == "sent"
+    body = calls["replies"][0]
+    assert "My last tour on Mondays starts at 6:00 PM" in body
+    assert body.count("Sunday, November 15") == 2
+    assert "Monday, November 9" not in body and "Tuesday" not in body
 
 
 def test_sunday_ask_with_sunday_full_says_so(monkeypatch):
