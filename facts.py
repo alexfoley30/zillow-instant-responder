@@ -86,7 +86,22 @@ _RULES = [
         r"(still|currently|now) available|is (it|this|the (home|house|unit|property)) (still )?available|"
         r"available (date|now|immediately)|move[- ]?in (date )?(available|ready)|"
         r"when (is|'s) (it|the home|the house) (open|free))", re.IGNORECASE)),
+    # application request: Zillow's "requested an application" button and plain
+    # "can you send me an application?" get the link and a tour ask, never the
+    # "Great question, checking on that" ack + needs-you ping (Trever, 250 W
+    # Queen Creek #102, 2026-11-12; Alex: "why aren't we just giving him a link
+    # to the application and setting up an appointment"). Last on purpose: a
+    # pricing or move-in question in the same message keeps its own answer.
+    ("application_request", re.compile(
+        r"((send|text|email|share|give|get|have)( me| us)? (an? |the |your )?"
+        r"(rental )?application|requested an application|application (link|form)|"
+        r"link (to|for) (the )?appl(y|ication)|(how|where) (do|can|would) (i|we) apply|"
+        r"(can|could|may) (i|we) apply|(ready|like|want|wanting) to apply|apply online)",
+        re.IGNORECASE)),
 ]
+
+APP_LINK = "https://www.arizonaeliteproperties.com/vacancies"
+APPLICATION_LINE = f"Absolutely! Here's the application whenever you're ready: {APP_LINK}"
 
 MOVE_IN_NOW_LINE = ("Yes, the home is available now, so you can move in as soon "
                     "as you're approved and the lease is signed.")
@@ -124,6 +139,7 @@ ANSWER_LINES = {
     "move_in_now": MOVE_IN_NOW_LINE,
     "apply_first": ("On pricing - the best first step is getting an application "
                     "in; the owner reviews offers from applicants."),
+    "application_request": APPLICATION_LINE,
 }
 
 

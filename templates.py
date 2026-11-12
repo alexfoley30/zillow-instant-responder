@@ -2,7 +2,9 @@
 booking, soft application mention, full signature. No em dashes in body copy
 (the signature's em dash is Alex's sanctioned brand exception)."""
 
-APP_LINK = "https://www.arizonaeliteproperties.com/vacancies"
+import facts
+
+APP_LINK = facts.APP_LINK
 
 SIGNATURE = (
     "Alex Foley\n"
@@ -33,6 +35,13 @@ def _lead_block(ack, answer):
     return QUESTION_ACK if ack else ""
 
 
+def _app_tail(answer):
+    """The soft application line, unless the lead-in already gave the link."""
+    if answer and APP_LINK in answer:
+        return ""
+    return f" You can also start an application here whenever you're ready: {APP_LINK}"
+
+
 def availability_ask(first_name, address, ack=False, answer=None, day=None):
     """Template 1 - first reply when no showing exists at the house. When the
     renter already named a day (rules.named_day_without_time), ask for a time
@@ -52,8 +61,8 @@ def availability_ask(first_name, address, ack=False, answer=None, day=None):
         + ask +
         f"{WINDOWS_BLOCK}\n"
         "Pick a time that works and I'll lock it in for you. Same-day tours are "
-        "usually doable too if you give me a couple hours' notice. You can also start an "
-        f"application here whenever you're ready: {APP_LINK}\n\n"
+        "usually doable too if you give me a couple hours' notice."
+        + _app_tail(answer) + "\n\n"
         "Looking forward to meeting you!\n\n"
         f"{SIGNATURE}"
     )
@@ -71,9 +80,8 @@ def offer_existing(first_name, address, when_human, ack=False, answer=None):
         "time works for you and I'll get you set up. Here's when I have open this "
         "week (Phoenix time):\n\n"
         f"{WINDOWS_BLOCK}\n"
-        "You can also start an application here whenever you're ready: "
-        f"{APP_LINK}\n\n"
-        "Looking forward to meeting you!\n\n"
+        + (_app_tail(answer).strip() + "\n\n" if _app_tail(answer) else "")
+        + "Looking forward to meeting you!\n\n"
         f"{SIGNATURE}"
     )
 
