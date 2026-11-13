@@ -1827,12 +1827,29 @@ def route_message(thread_id: str, subject: str, sender: str, message_id: str) ->
 
 # ---------------------------------------------------------------- http
 
+# Returned by Handler._read_json when the body could not be parsed. A sentinel,
+# not None: a body of literal `null` parses fine and must stay distinguishable
+# from a parse failure, which has already answered 400.
+_BAD_JSON = object()
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, text):
         self.send_response(code)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(text.encode())
+
+    def _read_json(self):
+        """Parse the POST body, or answer 400 and return _BAD_JSON. Callers
+        test `is _BAD_JSON` and return; anything else is the decoded body."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            return json.loads(raw or b"{}")
+        except Exception as e:  # noqa: BLE001
+            self._send(400, f"bad json: {e}")
+            return _BAD_JSON
 
     def do_GET(self):
         self._send(200, f"zillow-pipeline ok (dry_run={dry_run()})")
@@ -1849,12 +1866,8 @@ class Handler(BaseHTTPRequestHandler):
         if required and secret != required:
             self._send(401, "bad secret")
             return
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length) if length else b"{}"
-            payload = json.loads(raw or b"{}")
-        except Exception as e:  # noqa: BLE001
-            self._send(400, f"bad json: {e}")
+        payload = self._read_json()
+        if payload is _BAD_JSON:
             return
 
         try:
@@ -1977,12 +1990,8 @@ class Handler(BaseHTTPRequestHandler):
         if not website_lead.path_matches(self.path):
             self._send(404, "not found")
             return
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length) if length else b"{}"
-            payload = json.loads(raw or b"{}")
-        except Exception as e:  # noqa: BLE001
-            self._send(400, f"bad json: {e}")
+        payload = self._read_json()
+        if payload is _BAD_JSON:
             return
         try:
             code, text = website_lead.handle(payload, gm.poke_ping)
