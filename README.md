@@ -14,12 +14,34 @@ New Zillow email lands in alex@azfoleyhomes.com
 Renter has a reply in a few seconds, 24/7, independent of Alex's Mac.
 ```
 
-No AI in the hot path = no token cost, no Anthropic key, dirt cheap to run.
-`responder.py` is pure Python standard library — no pip install, no build step.
+Claude is used only for narrow micro-calls (`llm.py`: classify and extract). Code, never
+the model, decides what gets sent, so token cost stays tiny. The service is no longer
+stdlib-only: `render.yaml` builds with `pip install -r requirements.txt`, and
+`ANTHROPIC_API_KEY` plus a Firebase service-account file are both required.
+
+## Routes
+
+The service answers five paths, not just one (`responder.py`, `Handler.do_POST`):
+
+| Path | Who calls it | Auth |
+|---|---|---|
+| `GET /` | Render health check | none |
+| `POST /` | the Composio Gmail trigger | `X-Webhook-Secret: <WEBHOOK_SECRET>` |
+| `POST /reprocess` | the Claude sweep, when it spots drift | `X-Webhook-Secret: <REPROCESS_SECRET>`, falling back to `WEBHOOK_SECRET` |
+| `POST /send-approved` | the Poke approval relay, after Alex answers a needs-you ping | same as `/reprocess` |
+| `POST /hooks/website-lead/<token>` | the boundlessaz.com Netlify form notification | the token in the URL, derived from `POKE_API_KEY`; with no key the route is off |
 
 ## What's already done (by Claude)
 
-- `responder.py` — the full webhook receiver + reply logic (idempotent, secret-verified)
+- `responder.py` — the webhook receiver + reply logic (idempotent, secret-verified)
+- `gmail_client.py` — Composio Gmail/Calendar wrapper and message parsing
+- `calendar_logic.py` — availability windows, event create/update/delete
+- `ledger.py` — Firestore single-writer locks and thread state
+- `rules.py`, `templates.py`, `facts.py` — routing rules, reply copy, property facts
+- `llm.py` — the Haiku classify/extract micro-calls
+- `website_lead.py` — the Netlify owner-lead hook (see Routes above)
+- `cron.py` — nudges, reminders and stuck-send alerts
+- `scripts/` — `application.py`, `sync_facts.py`, `shadow_dump.py`
 - `render.yaml` — one-file deploy config for Render
 - This runbook
 
@@ -53,18 +75,27 @@ The old key (`ck_7SYX8U2k...`) was pasted into a chat transcript, so treat it as
    pointing at wherever you push this folder).
 3. Render auto-detects `render.yaml`. Pick the **Starter** plan (NOT Free — Free sleeps
    and kills instant response).
-4. In the service's Environment tab, set:
+4. In the service's Environment tab, set every var `render.yaml` marks `sync: false`
+   (that file is the authority; this list mirrors it):
    - `COMPOSIO_API_KEY` = your new key from Step 1
    - `COMPOSIO_CONNECTED_ACCOUNT_ID` = `gmail_boast-punnet`
+   - `COMPOSIO_USER_ID` = the Composio user id for that connected account
    - `AWAITING_RENTER_LABEL_ID` = `Label_1717014254813700027`  (zillow/awaiting-renter)
    - `HANDLED_LABEL_ID` = `Label_6932202305849666189`  (zillow/handled)
+   - `NEEDS_REPLY_LABEL_ID` = the zillow/needs-reply label id
    - `WEBHOOK_SECRET` = make up a long random string; use the same value in Step 2's header
+   - `ANTHROPIC_API_KEY` = for the Haiku classify/extract calls
+   - `POKE_ENDPOINT` = where needs-you / away-block / same-day pings go
+   Already set for you in `render.yaml`: `DRY_RUN` (ships as `"true"`, flip to `"false"`
+   to go live) and `GOOGLE_APPLICATION_CREDENTIALS=/etc/secrets/firebase-sa.json`. Upload
+   the Firebase service-account JSON as a Render Secret File named `firebase-sa.json`.
 5. Deploy. Copy the live URL (e.g. `https://zillow-instant-responder.onrender.com`) and
    paste it into the Composio trigger from Step 2.
 
 ### Step 4 — Test
 
-Hit the URL in a browser — you should see `zillow-instant-responder ok` (health check).
+Hit the URL in a browser — you should see `zillow-pipeline ok (dry_run=true)` (health
+check; the flag echoes `DRY_RUN`, so `dry_run=false` means it is live).
 Then send a test Zillow-style inquiry (or wait for a real one) and confirm a reply goes
 out in seconds and the thread gets the `zillow/awaiting-renter` label.
 
@@ -73,7 +104,7 @@ out in seconds and the thread gets the `zillow/awaiting-renter` label.
 - The exact Composio v3 execute endpoint path and trigger payload shape can drift with
   their API version. `responder.py` is defensive about payload shape, but if the first
   real trigger logs a parse miss, send Claude the logged payload and it'll adjust
-  `extract_event()` in one edit.
+  `extract_event()` in `gmail_client.py` in one edit.
 - Once this is live and confirmed, the 5-minute sweep can be slowed to ~10-15 min (it's
   now just a backstop for booking replies), cutting cost further. Tell Claude when ready.
 - If you ever want to avoid the monthly host cost, the alternative is running this on an
