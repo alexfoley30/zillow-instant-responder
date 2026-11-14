@@ -64,6 +64,14 @@ def _ev_end(ev: dict) -> datetime | None:
         return None
 
 
+def _declined_by_me(ev: dict) -> bool:
+    """Alex said no to it, so it does not block him. Natalie 2026-11-08: his
+    sister's custody blocks ("Cloonan Kids with Dad/Mom", declined, two days
+    each) made Monday and Wednesday read as booked up while both were open."""
+    return any(a.get("self") and a.get("responseStatus") == "declined"
+               for a in ev.get("attendees") or [])
+
+
 def _ev_all_day_covers(ev: dict, day) -> bool:
     """All-day events carry start.date (no dateTime). End date is exclusive."""
     raw = (ev.get("start") or {}).get("date")
@@ -160,14 +168,17 @@ def validate_slot(start_az: datetime, address: str, events: list,
                   declined_iso: list = None, earliest_daily: str = None,
                   latest_daily: str = None,
                   enforce_daily_bounds: bool = True,
-                  we_offered: bool = False) -> dict:
+                  we_offered: bool = False,
+                  allow_cover: bool = False) -> dict:
     """Deterministic validation of one candidate slot.
     Returns {"ok": True, "agent": {...}, "same_day": bool} or
     {"ok": False, "reason": str, "fold": {...}|None}.
 
-    Every slot books with Alex since 2026-10-25, same-day included, so every
-    slot is checked against his calendar: overlap, drive time, away-block.
-    An existing event at the SAME property is a fold, not a conflict.
+    Alex first, same-day included: every slot is checked against his calendar
+    (overlap, drive time, away-block). An existing event at the SAME property
+    is a fold, not a conflict. allow_cover=True (the renter PROPOSED this time)
+    books a time Alex can't make with JACE, then RHETT, instead of countering
+    (Alex 2026-11-04). Times WE pick (counters, offers) stay Alex-only.
     """
     now_az = now_az or datetime.now(AZ_TZ)
     bounds = bounds or {}
@@ -203,18 +214,25 @@ def validate_slot(start_az: datetime, address: str, events: list,
     # All-day events now count toward the day (so away blocks finally register);
     # the timed-overlap checks below skip them naturally (_ev_start is None).
     day_events = []
+    day = start_az.date()
     for ev in events:
+        if _declined_by_me(ev):
+            continue
         s = _ev_start(ev)
         if s is not None:
-            if s.astimezone(AZ_TZ).date() == start_az.date():
+            # A timed event can run for days (the "Cloonan Kids with Dad"
+            # family block is Mon 8am to Wed 8am); it counts on every day it
+            # touches, not just the day it starts.
+            e = _ev_end(ev) or s
+            s_day = s.astimezone(AZ_TZ).date()
+            e_day = (e - timedelta(microseconds=1)).astimezone(AZ_TZ).date()
+            if s_day <= day <= max(s_day, e_day):
                 day_events.append(ev)
-        elif _ev_all_day_covers(ev, start_az.date()):
+        elif _ev_all_day_covers(ev, day):
             day_events.append(ev)
 
     # Away block applies to every candidate day.
-    status = rules.away_block_status(rules.away_events(day_events, start_az.date()))
-    if status == "blocked":
-        return {"ok": False, "reason": "away-blocked", "fold": None}
+    # Away events are checked per agent below (Alex, then Jace, then Rhett).
 
     # Existing showing at the same house wins ONCE -> offer the fold instead
     # of double-booking. The caller passes ignore_same_house=True after the
@@ -224,8 +242,15 @@ def validate_slot(start_az: datetime, address: str, events: list,
     if not ignore_same_house:
         existing = find_existing_showing(address, events=day_events,
                                          min_lead_hours=0)
+        # A "today" request always hears about today's existing showing first,
+        # however far apart the times are (Alex 2026-11-04: "if they say today
+        # we always offer the time we already have"); other days keep 6 hours.
+        today_ask = (existing is not None
+                     and start_az.date() == now_az.date()
+                     and existing["start_az"].date() == now_az.date())
         if (existing
-                and abs((existing["start_az"] - start_az).total_seconds()) < 3600 * 6
+                and (today_ask or
+                     abs((existing["start_az"] - start_az).total_seconds()) < 3600 * 6)
                 and slot_acceptable_to_renter(existing["start_az"], declined_iso,
                                               earliest_daily, latest_daily)):
             # Never offer a slot the renter already declined or can't make -
@@ -236,30 +261,77 @@ def validate_slot(start_az: datetime, address: str, events: list,
     same_day = rules.is_same_day(start_az, now_az)
     agent = rules.pick_agent(start_az, now_az)
 
-    # ALEX'S CALENDAR ONLY (Alex 2026-10-25: "make all showings for me moving
-    # forward", "reply to everyone using only my calendar"). Before this a
-    # time Alex was busy for booked with the cover agent (Rhett, the 7/30
-    # Kim/New Town rule) and same-day skipped the check entirely. Now a slot
-    # that overlaps his calendar, or leaves no drive time, is simply not free,
-    # same-day included, and the caller counters with times he can make.
+    # ALEX FIRST, THEN JACE, THEN RHETT (Alex 2026-11-04: "the responder is
+    # almost never booking appointments anymore", "if my calendar is booked we
+    # book jace, then rhett"). 10/25-11/4 a time Alex was busy for was
+    # countered, the review gate blocked the counter as contradicting the
+    # renter, and the lead sat. A renter's own valid time now goes to the first
+    # of the three who is free. Showings already assigned to Jace or Rhett sit
+    # on Alex's calendar too (agents are invited), so each event counts against
+    # the agent it names, not against Alex.
+    order = [agent] if agent["email"] != rules.ALEX["email"] else \
+        [rules.ALEX, rules.JACE, rules.RHETT]
+    if not allow_cover:
+        order = order[:1]
+    first_conflict = None
+    for who in order:
+        conflict = _agent_conflict(who, address, start_az, day_events)
+        if not conflict:
+            cover = None if who["email"] == order[0]["email"] else first_conflict
+            return {"ok": True, "agent": who, "same_day": same_day,
+                    "jace_cover": cover}
+        first_conflict = first_conflict or conflict
+    return {"ok": False, "reason": first_conflict, "fold": None}
+
+
+def _event_agent(ev: dict) -> str:
+    """Which of us an event belongs to: 'jace' or 'rhett' when a showing names
+    that agent (service format "Agent: Jace Johnson (email)", or a hand-made
+    "Rhett Showing: ..." title), else 'alex' (his own appointments)."""
+    desc = str(ev.get("description", ""))
+    m = re.search(r"Agent:\s*([^(\n]+?)\s*\(", desc)
+    name = (m.group(1) if m else "").lower()
+    if not name:
+        title = str(ev.get("summary", "")).lower()
+        name = next((k for k in ("jace", "rhett") if re.match(rf"\s*{k}\b", title)), "")
+    for key in ("jace", "rhett"):
+        if key in name:
+            return key
+    return "alex"
+
+
+def _agent_conflict(who: dict, address: str, start_az: datetime,
+                    day_events: list):
+    """None when this agent can take the slot, else 'away' | 'busy' | 'drive-gap'
+    (reasons stay 'alex-*' for Alex so callers and logs read as before)."""
+    key = next(k for k, v in rules.AGENTS.items() if v["email"] == who["email"])
+    tag = "alex-" if key == "alex" else f"{key}-"
+    aways = rules.away_events(day_events, start_az.date())
+    for ev in aways:
+        text = (" ".join([str(ev.get("summary", "")), str(ev.get("description", ""))])
+                + " " + " ".join(str(a.get("email", "")) for a in ev.get("attendees", []) or [])).lower()
+        named = [k for k in ("jace", "rhett") if k in text or rules.AGENTS[k]["email"] in text]
+        if (key == "alex" and not named) or key in named:
+            return "away-blocked" if key == "alex" else tag + "away"
     end_az = start_az + timedelta(minutes=rules.SHOWING_MINUTES)
     for ev in day_events:
+        if _event_agent(ev) != key:
+            continue
         s, e = _ev_start(ev), _ev_end(ev)
         if not s or not e:
             continue
         s_az, e_az = s.astimezone(AZ_TZ), e.astimezone(AZ_TZ)
         if rules.same_property(address, _ev_text(ev)):
-            continue  # he is already at this house; the snap/fold logic handles it
+            continue  # already at this house; the snap/fold logic handles it
         if s_az < end_az and start_az < e_az:
-            return {"ok": False, "reason": "alex-busy", "fold": None}
+            return tag + "busy"
         ev_addr = str(ev.get("location", "")) or str(ev.get("summary", ""))
-        if not rules.same_property(address, _ev_text(ev)) and ev_addr.strip():
+        if ev_addr.strip():
             gap = rules.drive_gap_minutes(address, ev_addr)
             if (s_az >= end_az and (s_az - end_az) < timedelta(minutes=gap)) or \
                (e_az <= start_az and (start_az - e_az) < timedelta(minutes=gap)):
-                return {"ok": False, "reason": "drive-gap", "fold": None}
-
-    return {"ok": True, "agent": agent, "same_day": same_day, "jace_cover": None}
+                return "drive-gap" if key == "alex" else tag + "drive-gap"
+    return None
 
 
 def counter_slots(address: str, events: list, now_az: datetime = None,
