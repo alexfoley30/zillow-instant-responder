@@ -36,8 +36,8 @@ import os
 import re
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from zoneinfo import ZoneInfo
 
+import aztime
 import calendar_logic as cal
 import cron
 import facts
@@ -51,7 +51,7 @@ import website_lead
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("zillow-instant")
 
-AZ_TZ = ZoneInfo("America/Phoenix")
+AZ_TZ = aztime.AZ_TZ  # the one Arizona zone, re-exported for this module
 PORT = int(os.environ.get("PORT", "8080"))
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 # Auth for the watchdog's /reprocess endpoint (separate from the Composio
@@ -798,7 +798,7 @@ def _handle_reply(thread_id, doc, msgs, renter_text, message_id, ctx) -> str:
             if len(slots) > 1:
                 second = slots[1]
                 if second["start_az"].date() == slots[0]["start_az"].date():
-                    when_h += f" or at {second['start_az'].strftime('%-I:%M %p')}"
+                    when_h += f" or at {aztime.clock(second['start_az'])}"
                 else:
                     when_h += f" or {second['when_human']}"
             result = send_stage(thread_id, f"reply__{message_id}", relay,
@@ -950,10 +950,6 @@ def _hhmm(value):
     return value if isinstance(value, str) and _HHMM_RE.match(value) else None
 
 
-def _clock(t) -> str:
-    return t.strftime("%-I:%M %p")
-
-
 def _cand_date(cand: dict):
     try:
         return date.fromisoformat((cand or {}).get("date") or "")
@@ -1005,8 +1001,8 @@ def _asked_when(item: dict) -> str:
     """How the renter's own ask reads back to them."""
     if item["kind"] == "exact":
         return cal.fmt_showing_time(item["slots"][0])
-    day = item["date"].strftime("%A, %B %-d")
-    fmt = lambda s: _clock(datetime.strptime(s, "%H:%M"))  # noqa: E731
+    day = aztime.day(item["date"])
+    fmt = lambda s: aztime.clock(datetime.strptime(s, "%H:%M"))  # noqa: E731
     if item["after"] and item["before"]:
         return f"{day} between {fmt(item['after'])} and {fmt(item['before'])}"
     if item["after"]:
@@ -1016,7 +1012,7 @@ def _asked_when(item: dict) -> str:
 
 def _hours_line(d) -> str:
     lo, hi = rules.SHOWING_WINDOWS[d.weekday()]
-    return f"{d.strftime('%A')}s from {_clock(lo)} to {_clock(hi)}"
+    return f"{aztime.weekday(d)}s from {aztime.clock(lo)} to {aztime.clock(hi)}"
 
 
 def _reason_line(items: list, failures: list) -> str | None:
@@ -1041,14 +1037,15 @@ def _reason_line(items: list, failures: list) -> str | None:
         # and the review blocked it (Marcus, Willetta, 2026-11-11).
         asked = first["slots"][0]
         lo, hi = rules.SHOWING_WINDOWS[asked.weekday()]
-        day = asked.strftime("%A")
+        day = aztime.weekday(asked)
         if asked.time() < lo:
-            return (f"My first tour on {day}s starts at {_clock(lo)} (Arizona "
-                    f"time), so {_clock(asked)} is a little early.")
+            return (f"My first tour on {day}s starts at {aztime.clock(lo)} "
+                    f"(Arizona time), so {aztime.clock(asked)} is a little "
+                    "early.")
         last = (datetime.combine(asked.date(), hi)
                 - timedelta(minutes=rules.SHOWING_MINUTES))
-        return (f"My last tour on {day}s starts at {_clock(last)} (Arizona "
-                f"time), so {_clock(asked)} is past that.")
+        return (f"My last tour on {day}s starts at {aztime.clock(last)} "
+                f"(Arizona time), so {aztime.clock(asked)} is past that.")
     if all(r in ("too-soon", "past") for r in why):
         return ("I need about two hours' notice to get someone out there, so "
                 f"{when} is too soon.")
@@ -1074,7 +1071,7 @@ def _day_reason(d, now_az) -> str | None:
         return None
     if d == now_az.date():
         return "Today is already booked up on my end."
-    return f"{d.strftime('%A')} is already booked up on my end."
+    return f"{aztime.weekday(d)} is already booked up on my end."
 
 
 def _with_lead(body: str, lead: str) -> str:
@@ -1544,7 +1541,7 @@ def _book_valid_slot(thread_id, doc, first_name, address, relay, start_az, v,
     if same_day or jace_cover:
         reason = ("Alex busy" if jace_cover else "same-day")
         jace_ping = (f"{agent['name'].split()[0]} assigned: {first_name} at {address.split(',')[0]} "
-                     f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - {reason}. "
+                     f"{aztime.short_stamp(start_az)} - {reason}. "
                      "Conflict? Reply fast.")
 
     if dry_run():
@@ -1604,7 +1601,7 @@ def _book_valid_slot(thread_id, doc, first_name, address, relay, start_az, v,
     try:
         gm.poke_ping(jace_ping or (
             f"Booked: {first_name} - {address.split(',')[0]} - "
-            f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} with "
+            f"{aztime.short_stamp(start_az)} with "
             f"{agent['name'].split()[0]}. [FYI]"))
     except Exception as e:  # noqa: BLE001
         log.error("booked FYI ping failed: %s", e)
