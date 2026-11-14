@@ -5,6 +5,13 @@ windows, 2-hour minimum notice, SAME-DAY LADDER (Jace default), drive-time
 gap tiers, away-block detection, same-property matching, agent selection.
 """
 
+# Keeps the PEP 604 `X | None` annotations below as strings instead of
+# evaluating them at import, so this module imports on Python 3.9.
+# scripts/shadow_dump.py has to run under Apple's /usr/bin/python3 (3.9) and
+# imports the rules from here; without this it used to keep its own drifting
+# copy. Do not remove without reading that file's module docstring.
+from __future__ import annotations
+
 import re
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo

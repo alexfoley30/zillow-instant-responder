@@ -15,10 +15,14 @@ RUN IT WITH APPLE PYTHON. This is not a preference:
 
   * /usr/bin/python3 (3.9.6) is the ONLY interpreter here with firebase_admin
     + google-cloud-firestore installed. Homebrew 3.13/3.14 lack them.
-  * Because it is 3.9, this file must NOT import ledger/rules/calendar_logic/
+  * Because it is 3.9, this file must NOT import ledger/calendar_logic/
     facts/gmail_client/llm - they use PEP 604 `X | None` annotations that
-    raise TypeError at import on 3.9. The ~30 lines we need from rules.py are
-    reimplemented below and must be kept in sync with it.
+    raise TypeError at import on 3.9. rules.py is the exception: it carries
+    `from __future__ import annotations` and only imports stdlib, so it DOES
+    import cleanly on 3.9 and is imported below rather than mirrored. Keep
+    that future-import in place (tests/test_shadow_dump_shares_rules.py
+    fails if it goes); the hand-kept copy that used to live here had drifted
+    into two real bugs.
   * Credentials come from the service-account JSON, never ADC (ADC here is
     stale, has no quota_project_id, and hangs ~300s before failing).
 """
@@ -31,7 +35,7 @@ import re
 import subprocess
 import sys
 import warnings
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 warnings.filterwarnings("ignore")  # 3.9 EOL FutureWarning + LibreSSL notice
 # grpc spews "FD from fork parent still in poll list" across stdout when the
@@ -46,6 +50,14 @@ try:
 except ImportError as e:
     sys.exit(f"ERROR: {e}\nRun with /usr/bin/python3 - it is the only "
              f"interpreter here with firebase_admin installed.")
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    import rules
+except Exception as e:  # noqa: BLE001
+    sys.exit("ERROR: cannot import rules.py (%s: %s)\nIt must keep "
+             "`from __future__ import annotations` to import on 3.9."
+             % (type(e).__name__, e))
 
 SA_PATH = os.path.expanduser("~/.config/boundless/firebase-sa.json")
 PROJECT_ID = "boundless-portal-c94d0"
@@ -75,47 +87,22 @@ NAMED_CASES = ["Anna", "alondra", "Lyndsey"]
 def is_poke_stage(stage_key):
     return (stage_key or "").startswith("poke__")
 
-# ---- mirrored from rules.py (cannot import it on 3.9) --------------------
-SHOWING_WINDOWS = {           # weekday(): Mon=0 .. Sun=6
-    0: (time(10, 0), time(18, 30)), 1: (time(10, 0), time(15, 0)),
-    2: (time(10, 0), time(18, 30)), 3: (time(10, 0), time(15, 0)),
-    4: (time(10, 0), time(18, 30)), 5: (time(10, 0), time(14, 0)),
-    6: (time(10, 0), time(14, 0)),
-}
-MIN_NOTICE_HOURS = 2
-SHOWING_MINUTES = 30
-KNOWN_AGENTS = {"Alex Foley", "Jace Johnson", "Rhett Lueck"}
-_DIRECTIONALS = {"n", "s", "e", "w", "ne", "nw", "se", "sw",
-                 "north", "south", "east", "west"}
-_STREET_TYPES = {"ave", "avenue", "st", "street", "dr", "drive", "rd", "road",
-                 "ln", "lane", "ct", "court", "blvd", "boulevard", "way",
-                 "pl", "place", "cir", "circle", "trl", "trail", "pkwy",
-                 "parkway", "loop", "ter", "terrace"}
-
-
-def number_and_core(address):
-    """'3309 E San Remo Ave' -> ('3309', 'san remo')."""
-    tokens = re.findall(r"[a-z0-9']+", (address or "").lower())
-    if not tokens or not tokens[0].isdigit():
-        return None, None
-    core = [t for t in tokens[1:]
-            if t not in _DIRECTIONALS and t not in _STREET_TYPES]
-    return tokens[0], " ".join(core)
+# ---- the scheduling rules, imported not mirrored ------------------------
+# This block used to be a hand-kept copy of ~30 lines of rules.py, and it had
+# drifted: its in_window() lacked the midnight-crossing guard, and its
+# addr_matches() used a substring street-number test that rules.py had
+# already replaced with a word-boundary one. Aliases, so the call sites below
+# read the same but there is one definition.
+MIN_NOTICE_HOURS = rules.MIN_NOTICE_HOURS
+KNOWN_AGENTS = {a["name"] for a in rules.AGENTS.values()}
+_STREET_TYPES = rules._STREET_TYPES
+in_window = rules.in_window
 
 
 def addr_matches(blocked, address):
-    """Fuzzy match, same semantics as rules.is_blocked_address."""
-    number, core = number_and_core(blocked)
-    if not number or not core:
-        return False
-    a = (address or "").lower()
-    return number in a and core in a
-
-
-def in_window(start):
-    lo, hi = SHOWING_WINDOWS[start.weekday()]
-    end = (start + timedelta(minutes=SHOWING_MINUTES)).time()
-    return lo <= start.time() and end <= hi
+    """Does one blocked address match one thread address? Thin adapter over
+    rules.is_blocked_address, which takes the blocklist as a list."""
+    return rules.is_blocked_address(address, [blocked])
 
 
 # ---- read-only guard ----------------------------------------------------
