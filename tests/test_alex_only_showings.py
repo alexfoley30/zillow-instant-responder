@@ -70,8 +70,8 @@ def test_same_house_overlap_is_not_a_conflict():
 def test_any_away_event_blocks_the_day():
     away = {"summary": "Out of town", "start": {"date": "2026-10-27"},
             "end": {"date": "2026-10-28"}}
-    assert rules.away_block_status([away]) == "blocked"
-    assert rules.away_block_status([]) == "clear"
+    assert rules.away_events([away], None) == [away]
+    assert rules.away_events([], None) == []
     start = datetime(2026, 10, 27, 11, 0, tzinfo=AZ)
     assert cal.validate_slot(start, ADDR, [away], now_az=NOW)["reason"] == "away-blocked"
 
