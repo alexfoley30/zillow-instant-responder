@@ -49,7 +49,10 @@ _RULES = [
     # inside "address"/"additional" in relay boilerplate and misfired on 8 of 12
     # new inquiries during the 7/30-8/1 shadow soak.
     ("as_is", re.compile(
-        r"\b(install|add|put in|replace|swap|change out|paint|turf|fence in)\b|"
+        r"\b(install|add|put in|replace|swap|change out|turf|fence in)\b|"
+        # "lead paint" / "lead-based paint" is a disclosure question, not a
+        # repaint request (Alex 2026-11-08).
+        r"(?<!lead )(?<!lead-)(?<!lead based )(?<!lead-based )\bpaint\b|"
         r"can you (fix|update|upgrade)", re.IGNORECASE)),
     # approval requirements: blanket 3x-income answer (Alex 2026-08-05, Daliana)
     ("requirements", re.compile(
@@ -70,8 +73,42 @@ _RULES = [
     ("fair_housing", re.compile(
         r"(neighborhood safe|is it safe|crime|what are the neighbors|"
         r"good schools|school district (good|rating)|kind of people|"
-        r"demographic)", re.IGNORECASE)),
+        r"demographic|(area|neighborhood|part of town|community) (is )?safe|"
+        r"safe (area|neighborhood|part of town|community|place to live)|"
+        r"safe to live|(good|bad|nice|rough|sketchy) (area|neighborhood|part of town)|"
+        r"(is|how is|how's) (the|this|that) (area|neighborhood) "
+        r"(safe|good|bad|nice|rough|sketchy|okay|ok))", re.IGNORECASE)),
+    # availability / earliest move-in: a home listed for rent is vacant "99.9%
+    # of the time", so the answer is always "available now" (Alex 2026-11-04,
+    # Sophia at Marigold: "when is the earliest move in date?"). Leased homes
+    # never get here: the blocked-address guard stops them first. A renter
+    # asking whether a LATER move-in works is not this question.
+    ("move_in_now", re.compile(
+        r"(earliest move|soonest (move|i can|we can)|"
+        r"when (is|will) (it|the (home|house|unit|property)|this) (be )?(available|ready|vacant)|"
+        r"when can (i|we) (move|get in)|"
+        r"(still|currently|now) available|is (it|this|the (home|house|unit|property)) (still )?available|"
+        r"available (date|now|immediately)|move[- ]?in (date )?(available|ready)|"
+        r"when (is|'s) (it|the home|the house) (open|free))", re.IGNORECASE)),
+    # application request: Zillow's "requested an application" button and plain
+    # "can you send me an application?" get the link and a tour ask, never the
+    # "Great question, checking on that" ack + needs-you ping (Trever, 250 W
+    # Queen Creek #102, 2026-11-12; Alex: "why aren't we just giving him a link
+    # to the application and setting up an appointment"). Last on purpose: a
+    # pricing or move-in question in the same message keeps its own answer.
+    ("application_request", re.compile(
+        r"((send|text|email|share|give|get|have)( me| us)? (an? |the |your )?"
+        r"(rental )?application|requested an application|application (link|form)|"
+        r"link (to|for) (the )?appl(y|ication)|(how|where) (do|can|would) (i|we) apply|"
+        r"(can|could|may) (i|we) apply|(ready|like|want|wanting) to apply|apply online)",
+        re.IGNORECASE)),
 ]
+
+APP_LINK = "https://www.arizonaeliteproperties.com/vacancies"
+APPLICATION_LINE = f"Absolutely! Here's the application whenever you're ready: {APP_LINK}"
+
+MOVE_IN_NOW_LINE = ("Yes, the home is available now, so you can move in as soon "
+                    "as you're approved and the lease is signed.")
 
 APPLIANCES_LINE = ("Yes, the refrigerator, washer, and dryer are all included "
                    "with the home.")
@@ -103,8 +140,10 @@ ANSWER_LINES = {
     "virtual_tour": VIRTUAL_TOUR_LINE,
     "fair_housing": ("On your question - I have to stick to details about the "
                      "property itself, but I'm happy to tell you all about the home."),
+    "move_in_now": MOVE_IN_NOW_LINE,
     "apply_first": ("On pricing - the best first step is getting an application "
                     "in; the owner reviews offers from applicants."),
+    "application_request": APPLICATION_LINE,
 }
 
 
