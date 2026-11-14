@@ -193,32 +193,22 @@ def away_events(events: list, day_az) -> list:
 
 
 def away_block_status(events_that_day: list) -> str:
-    """'blocked' (whole team away), 'alex-away' (Jace/Rhett not on the event),
-    or 'clear'. Renter never hears why - callers phrase it as 'booked up'."""
-    aways = away_events(events_that_day, None)
-    if not aways:
-        return "clear"
-    for ev in aways:
-        attendees = " ".join(str(a.get("email", "")) for a in ev.get("attendees", []) or [])
-        text = (" ".join([str(ev.get("summary", "")), str(ev.get("description", ""))])
-                + " " + attendees).lower()
-        team_on_event = JACE["email"] in text or RHETT["email"] in text or \
-            "jace" in text or "rhett" in text
-        if team_on_event:
-            return "blocked"
-    return "alex-away"
+    """'blocked' or 'clear'. Alex shows every house himself since 2026-10-25
+    ("make all showings for me moving forward. My team ... aren't renting
+    them out"), so any away event on his calendar blocks the day; there is
+    no team cover any more. Renter never hears why - callers phrase it as
+    'booked up'."""
+    return "blocked" if away_events(events_that_day, None) else "clear"
 
 
 # ---------------------------------------------------------------- agent pick
 
 def pick_agent(start_az: datetime, now_az: datetime, thread_override: str | None = None) -> dict:
-    """Same-day bookings default to RHETT (Alex 2026-08-13, replacing the
-    7/27 Jace default); Alex default for next-day+. A thread-level override
-    ('have Jace cover') beats both."""
+    """ALEX first for every showing, same-day included (2026-10-25). When Alex
+    can't make a renter's own time, calendar_logic.validate_slot hands it to
+    JACE, then RHETT (2026-11-04). A thread-level override ('have Jace cover') still wins."""
     if thread_override and thread_override.lower() in AGENTS:
         return AGENTS[thread_override.lower()]
-    if start_az.date() == now_az.date():
-        return RHETT
     return ALEX
 
 
@@ -230,6 +220,46 @@ def is_same_day(start_az: datetime, now_az: datetime) -> bool:
 
 _WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
              "friday": 4, "saturday": 5, "sunday": 6}
+
+
+_CLOCK_TIME = re.compile(
+    r"\b\d{1,2}(:\d{2})?\s*(a\.?m\.?|p\.?m\.?)(?![a-z])|\b\d{1,2}:\d{2}\b"
+    r"|\bnoon\b|\bat \d{1,2}\b|\baround \d{1,2}\b|\bafter \d{1,2}\b"
+    r"|\bbefore \d{1,2}\b|\bbetween \d{1,2}", re.I)
+
+
+_DAY_WORD = re.compile(
+    r"\b(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?s?\b"
+    r"|\b(?:today|tonight|tomorrow|weekend)\b"
+    # Aaliyah 2026-11-11: "a tour on Nov 16" named no weekday, so the first
+    # message was never read for a day and the plain ask got blocked.
+    r"|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?"
+    r"|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}"
+    r"(?:st|nd|rd|th)?\b|\b\d{1,2}/\d{1,2}\b", re.I)
+
+
+def has_schedule_hint(text: str) -> bool:
+    """True when a message names a day or a clock time, so it is worth reading
+    for a tour time (2026-11-08: first messages that gave a day and window
+    were never read for one)."""
+    t = text or ""
+    return bool(_DAY_WORD.search(t) or _CLOCK_TIME.search(t))
+
+
+def named_day_without_time(text: str):
+    """The one weekday a first message names when it gives no clock time,
+    e.g. 'I'd love to tour on Monday if there is availability' -> 'Monday'.
+
+    Ashley, 2026-10-24 (1018 E Marigold Ln, thread 1a16eec59561deee): the
+    generic first reply asked 'what day and time works', the pre-send review
+    blocked it for ignoring her Monday, and she sat unanswered. None when no
+    weekday, several weekdays ('Saturday or Sunday'), or a clock time is
+    given - those keep the generic ask."""
+    t = (text or "").lower()
+    named = [name for name in _WEEKDAYS if re.search(rf"\b{name}s?\b", t)]
+    if len(named) != 1 or _CLOCK_TIME.search(t):
+        return None
+    return named[0].capitalize()
 
 
 def snap_weekday_dates(cls: dict, now_az: datetime) -> dict:
@@ -264,3 +294,45 @@ def snap_weekday_dates(cls: dict, now_az: datetime) -> dict:
         c["date"] = (now_az.date() + _td(days=days_ahead)).isoformat()
         c["weekday_snapped"] = True
     return cls
+
+
+def named_tour_dates(cls: dict, text: str, now_az: datetime) -> list:
+    """The day(s) a vague renter named with no clock time, as dates, so the
+    reply offers real times on THAT day instead of the week's windows.
+
+    Victor, 2026-10-27 (30209 N Yucca Dr, thread 1a17c18a5f6ca383): at
+    11:45pm he wrote "I would like to check it out tomorrow". The reply
+    repeated the week's windows, the pre-send review blocked it for ignoring
+    his day, and he sat unanswered all night. "Tomorrow" written late at
+    night is ambiguous (he may mean the morning that is hours away, or the
+    day after), so after 9pm or before 5am both days are named. At most two
+    dates; none when he gave a clock time or named nothing."""
+    from datetime import date as _date, timedelta as _td
+    if _CLOCK_TIME.search(text or ""):
+        return []
+    dates = []
+    for c in (cls or {}).get("time_candidates") or []:
+        if c.get("time") or not c.get("date"):
+            continue
+        try:
+            d = _date.fromisoformat(c["date"])
+        except (TypeError, ValueError):
+            continue
+        if d >= now_az.date() and d not in dates:
+            dates.append(d)
+    if not dates:
+        day = named_day_without_time(text)
+        low = (text or "").lower()
+        if day:
+            ahead = (_WEEKDAYS[day.lower()] - now_az.weekday()) % 7
+            dates.append(now_az.date() + _td(days=ahead))
+        elif re.search(r"\btomorrow\b", low):
+            dates.append(now_az.date() + _td(days=1))
+        elif re.search(r"\btoday\b|\btonight\b", low):
+            dates.append(now_az.date())
+    if len(dates) == 1 and re.search(r"\btomorrow\b", text or "", re.I):
+        if now_az.hour >= 21:
+            dates.append(dates[0] + _td(days=1))
+        elif now_az.hour < 5 and dates[0] > now_az.date():
+            dates.insert(0, dates[0] - _td(days=1))
+    return sorted(dates)[:2]
