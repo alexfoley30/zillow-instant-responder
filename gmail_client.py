@@ -11,9 +11,12 @@ import json
 import logging
 import os
 import re
+import ssl
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+
+import certifi
 
 log = logging.getLogger("zillow-instant.gmail")
 
@@ -26,6 +29,10 @@ ALEX_EMAIL = "alex@azfoleyhomes.com"
 
 POKE_ENDPOINT = os.environ.get("POKE_ENDPOINT", "")
 
+# Verify against the pinned certifi bundle, not Render's OS store: we control
+# when certifi updates (2026-10-23: eMudhra compromise, see requirements.txt).
+TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
 
 def _post_json(url: str, payload: dict, headers: dict = None,
                timeout: int = 20) -> bytes:
@@ -34,13 +41,14 @@ def _post_json(url: str, payload: dict, headers: dict = None,
     Every outbound call in this module is this same four-line block. Written
     out per call site they drifted on timeout and on whether the body was
     parsed at all, so the shape lives here once and callers decide only what
-    to do with the bytes.
+    to do with the bytes. TLS_CONTEXT is applied here for all of them, so a
+    new caller cannot forget the pinned certifi bundle.
     """
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), method="POST",
         headers={"Content-Type": "application/json", **(headers or {})},
     )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=timeout, context=TLS_CONTEXT) as r:
         return r.read()
 
 
@@ -255,6 +263,12 @@ def _phrase(*words):
     return r"\s+".join(words)
 
 
+_RENTER_MESSAGE_RE = re.compile(
+    r"RENTER\W{1,8}S\s+MESSAGE\s*(?P<msg>.+)", re.IGNORECASE | re.DOTALL)
+
+# Zillow's hidden notification id closes the reply email.
+_NOTIFICATION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
 RENTER_SAYS_RE = re.compile(
     r"says:\s*(?P<msg>.+?)(?:" + "|".join([
         _phrase("Reply", "to", r"\w"),
@@ -338,8 +352,16 @@ def extract_renter_text(m: dict) -> str:
     from a renter ...') and any quoted history."""
     body = msg_body(m)
     hit = RENTER_SAYS_RE.search(body)
+    labeled = _RENTER_MESSAGE_RE.search(body)
     if hit:
         text = hit.group("msg")
+    elif labeled:
+        # Reply format with a "RENTER'S MESSAGE" box: the full words live
+        # there. The top of the body is Zillow's hidden preview, cut off at
+        # ~150 chars (Natalie 2026-11-08: "How does..." lost "11 sound?").
+        text = labeled.group("msg")
+        cut = _CUT_RE.search(text)
+        text = text[:cut.start()] if cut else text
     else:
         cut = _CUT_RE.search(body)
         text = body[:cut.start()] if cut else body
@@ -353,7 +375,7 @@ def extract_renter_text(m: dict) -> str:
             continue
         if s.startswith(">") or (s.startswith("On ") and s.endswith("wrote:")):
             break
-        if _CHROME_RE.search(s):
+        if _CHROME_RE.search(s) or _NOTIFICATION_ID_RE.match(s):
             break
         lines.append(s)
         if len(lines) > 30:
