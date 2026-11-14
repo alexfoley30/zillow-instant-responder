@@ -39,7 +39,8 @@ deterministic validators in `rules.py` / `calendar_logic.py`. So you do need an
 - `facts.py` — standing-rule question router, then fact sheets
 - `templates.py` — every renter-facing string in one place
 - `cron.py` — in-process 20-minute maintenance ticker (label retries, stuck sends, nudges)
-- `scripts/` — `shadow_dump.py`, `sync_facts.py`
+- `website_lead.py` — the boundlessaz.com form hook, URL-token auth, one Poke per lead
+- `scripts/` — `shadow_dump.py`, `sync_facts.py`, `application.py` (who took the application, see the section at the bottom)
 - `tests/` — the regression suite (`python -m pytest -q`)
 - `render.yaml` — one-file deploy config for Render
 - This runbook
@@ -100,6 +101,7 @@ confirm a reply goes out in seconds and the thread gets the
 | `POST /` | The Composio Gmail trigger webhook. Guarded by `WEBHOOK_SECRET`. |
 | `POST /reprocess` | The watchdog sweep asks the service to re-look at a thread. Guarded by `REPROCESS_SECRET` (falls back to `WEBHOOK_SECRET`). |
 | `POST /send-approved` | Poke approval loop: Alex answered a needs-you ping and the approval MCP relays it here. Poke never emails renters, it commands this endpoint, so the service stays the single writer. Same secret as `/reprocess`. |
+| `POST /hooks/website-lead/<token>` | Netlify form webhook for boundlessaz.com leads (`owner-lead` and `contact`), one Poke text to Alex per lead. Netlify can't send a custom header, so this one is NOT behind `X-Webhook-Secret`: the token in the URL is an HMAC of `POKE_API_KEY`, so a leaked URL is a rate-limited nuisance at worst and never recovers the key. Rate limited to 30/hour. See `website_lead.py`. |
 
 ## Notes / honesty
 
