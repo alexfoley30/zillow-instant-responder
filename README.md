@@ -22,7 +22,10 @@ Costs stay low because the AI in the hot path is Haiku micro-calls only (classif
 and extract; code decides). It is not free: `ANTHROPIC_API_KEY` is required, and
 `llm.py` makes the calls. The service also has real dependencies now, pinned in
 `requirements.txt` (firebase-admin, anthropic, google-cloud-firestore,
-google-api-core), so Render runs `pip install -r requirements.txt` at build time.
+google-api-core, certifi, grpcio), so Render runs `pip install -r requirements.txt`
+at build time. Every pin there carries a comment saying what broke when it floated.
+Read those before changing any of them: the `google-api-core==2.33.0` pin and the
+`certifi` / `grpcio` floor are each load-bearing.
 The "pure standard library, no pip install" claim in earlier versions of this
 runbook is obsolete; do not rely on it.
 
