@@ -44,24 +44,25 @@ def _ev_text(ev: dict) -> str:
                      str(ev.get("description", ""))]).lower()
 
 
-def _ev_start(ev: dict) -> datetime | None:
-    raw = (ev.get("start") or {}).get("dateTime")
+def _parse_iso(raw) -> datetime | None:
+    """Google's ISO-8601 stamps -> datetime, or None when absent/unparseable.
+
+    fromisoformat rejects the trailing 'Z' Google sends, so every caller that
+    hand-rolled this had to remember the swap; the two that forgot (a declined
+    slot, an event being rebuilt for update) silently dropped the value.
+    """
     if not raw:
-        return None  # all-day events aren't showings
+        return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     except ValueError:
         return None
 
 
-def _ev_end(ev: dict) -> datetime | None:
-    raw = (ev.get("end") or {}).get("dateTime")
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+def _ev_dt(ev: dict, edge: str) -> datetime | None:
+    """`edge` is "start" or "end". None for all-day events, which carry a
+    `date` rather than a `dateTime` and are never showings."""
+    return _parse_iso((ev.get(edge) or {}).get("dateTime"))
 
 
 def _declined_by_me(ev: dict) -> bool:
@@ -118,7 +119,7 @@ def find_existing_showings(address: str, events: list = None,
             continue
         if "showing" not in hay and "open house" not in hay:
             continue
-        start = _ev_start(ev)
+        start = _ev_dt(ev, "start")
         if not start:
             continue
         if start < datetime.now(timezone.utc) + timedelta(hours=min_lead_hours):
@@ -151,14 +152,13 @@ def slot_acceptable_to_renter(start_az: datetime, declined_iso: list = None,
     if latest_daily and hm > latest_daily:
         return False
     for iso in declined_iso or []:
-        try:
-            d = datetime.fromisoformat(iso)
-            if d.tzinfo is None:
-                d = d.replace(tzinfo=AZ_TZ)
-            if abs((d - start_az).total_seconds()) <= 900:
-                return False
-        except (ValueError, TypeError):
+        d = _parse_iso(iso)
+        if d is None:
             continue
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=AZ_TZ)
+        if abs((d - start_az).total_seconds()) <= 900:
+            return False
     return True
 
 
@@ -212,18 +212,18 @@ def validate_slot(start_az: datetime, address: str, events: list,
     # an all-day event (no start.dateTime) appeared in the window - year 1
     # minus UTC-7 is out of range. Three live renters hit it 2026-08-05.
     # All-day events now count toward the day (so away blocks finally register);
-    # the timed-overlap checks below skip them naturally (_ev_start is None).
+    # the timed-overlap checks below skip them naturally (_ev_dt is None).
     day_events = []
     day = start_az.date()
     for ev in events:
         if _declined_by_me(ev):
             continue
-        s = _ev_start(ev)
+        s = _ev_dt(ev, "start")
         if s is not None:
             # A timed event can run for days (the "Cloonan Kids with Dad"
             # family block is Mon 8am to Wed 8am); it counts on every day it
             # touches, not just the day it starts.
-            e = _ev_end(ev) or s
+            e = _ev_dt(ev, "end") or s
             s_day = s.astimezone(AZ_TZ).date()
             e_day = (e - timedelta(microseconds=1)).astimezone(AZ_TZ).date()
             if s_day <= day <= max(s_day, e_day):
@@ -317,7 +317,7 @@ def _agent_conflict(who: dict, address: str, start_az: datetime,
     for ev in day_events:
         if _event_agent(ev) != key:
             continue
-        s, e = _ev_start(ev), _ev_end(ev)
+        s, e = _ev_dt(ev, "start"), _ev_dt(ev, "end")
         if not s or not e:
             continue
         s_az, e_az = s.astimezone(AZ_TZ), e.astimezone(AZ_TZ)
@@ -395,12 +395,9 @@ def _full_update_fields(ev: dict, description: str) -> dict:
     start_raw = str((ev.get("start") or {}).get("dateTime") or "")
     end_raw = str((ev.get("end") or {}).get("dateTime") or "")
     duration = rules.SHOWING_MINUTES
-    try:
-        s = datetime.fromisoformat(start_raw)
-        e = datetime.fromisoformat(end_raw)
+    s, e = _parse_iso(start_raw), _parse_iso(end_raw)
+    if s and e:
         duration = max(5, int((e - s).total_seconds() // 60))
-    except (ValueError, TypeError):
-        pass
     fields = {
         "calendar_id": "primary",
         "event_id": ev.get("id", ""),
