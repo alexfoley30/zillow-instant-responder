@@ -166,8 +166,10 @@ def review_gate(thread_id: str, body: str, template: str,
     repeats an earlier send, or answers the wrong thing. FAILS OPEN - the
     deterministic guards still stand when the review can't run. Returns
     (ok, reason)."""
-    if template == "approved_answer":
-        return True, ""  # Alex's own words are never second-guessed
+    if template in ("approved_answer", "first_reply_fallback"):
+        # Alex's own words are never second-guessed; the fallback is a fixed
+        # thanks + application link with no claim to contradict.
+        return True, ""
     try:
         msgs = msgs or gm.fetch_thread(thread_id)
         transcript = gm.thread_transcript(msgs)
@@ -273,6 +275,11 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
                trigger_message_id: str = "") -> str:
     """The ONLY function that sends renter email. Wins the Firestore lock or
     does nothing. Returns 'sent' | 'shadowed' | 'skipped:<why>'."""
+    if (stage_key.startswith("first_reply") and T.APP_LINK not in body
+            and T.SIGNATURE in body):
+        # Alex 2026-11-12: "everyone gets an app, and a response, period".
+        # propose_times / counter / snap templates had no link.
+        body = body.replace(T.SIGNATURE, T.APP_LINE + "\n\n" + T.SIGNATURE, 1)
     meta = dict(meta)
     meta.update({
         "template": meta.get("template", stage_key),
@@ -431,6 +438,37 @@ def _classify_first_message(text: str, now_az):
 
 def handle_new_inquiry(thread_id: str, first_name: str, address: str,
                        relay: str, renter_text: str, message_id: str) -> str:
+    out = _new_inquiry_attempt(thread_id, first_name, address, relay,
+                               renter_text, message_id)
+    if not (out or "").startswith("no-send:") or out in (
+            "no-send:superseded-by-newer-message", "no-send:blocked-address"):
+        return out  # sent, or a newer message / leased home owns the reply
+    try:
+        if rules.is_blocked_address(address, ledger.blocked_addresses()):
+            return out
+    except Exception as e:  # noqa: BLE001
+        log.error("fallback blocked-address check failed %s: %s", thread_id, e)
+    # Aaliyah, 2026-11-11 (2701 E Willetta): asked for an application and a
+    # tour on Nov 16; the review blocked every reply and she heard nothing for
+    # a day. Alex 2026-11-12: "everyone gets an app, and a response, period".
+    # Whatever stopped the real reply (and Alex was already pinged for it),
+    # the renter still gets thanks + the application link.
+    try:
+        if not dry_run() and gm.alex_replied_after(gm.fetch_thread(thread_id),
+                                                   message_id):
+            return out
+    except Exception as e:  # noqa: BLE001 - fall through and send
+        log.error("fallback reply check failed %s: %s", thread_id, e)
+    result = send_stage(thread_id, "first_reply__fallback", relay,
+                        T.first_reply_fallback(first_name, address),
+                        [AWAITING_LABEL, NEEDS_REPLY_LABEL], [],
+                        {"template": "first_reply_fallback"}, message_id)
+    log.info("first-reply fallback %s after %s: %s", thread_id, out, result)
+    return result if result in ("sent", "shadowed") else out
+
+
+def _new_inquiry_attempt(thread_id, first_name, address, relay, renter_text,
+                         message_id) -> str:
     ctx = {}
     return _with_block_retry(
         lambda: _handle_new_inquiry(thread_id, first_name, address, relay,
@@ -681,7 +719,17 @@ def _handle_reply(thread_id, doc, msgs, renter_text, message_id, ctx) -> str:
     # closer ("Sounds good!") is the acceptance our own template asked for,
     # and a bare "okay thanks" is ambiguous - a human decides, urgently,
     # instead of the thread dying in silence.
-    if _CLOSER_RE.match(renter_text or "") and intent not in ("benign_closer",):
+    # Jericka, 2026-11-12 (2701 E Willetta): offered Saturday 11:00, she wrote
+    # "Sounds good!", the classifier called it benign_closer, and the old
+    # check skipped benign_closer entirely, so she was never booked. An
+    # affirmative closer to a live offer is a yes whatever the label; a
+    # booked thread's "perfect, thanks" stays a closer.
+    affirm_live = (intent == "benign_closer" and doc.get("state") != ledger.BOOKED
+                   and _CLOSER_RE.match(renter_text or "")
+                   and _AFFIRM_RE.search(renter_text or "")
+                   and _offer_is_live(doc, now_az))
+    if affirm_live or (_CLOSER_RE.match(renter_text or "")
+                       and intent not in ("benign_closer",)):
         if _offer_is_live(doc, now_az):
             if _AFFIRM_RE.search(renter_text or ""):
                 log.info("closer affirm w/ live offer %s: %r -> accept_offer",
@@ -1025,9 +1073,19 @@ def _reason_line(items: list, failures: list) -> str | None:
     if all(r == "past" for r in why):
         return f"{when[0].upper()}{when[1:]} has already passed."
     if first["kind"] == "exact" and "out-of-window" in why:
-        return (f"I only show homes on {_hours_line(first['date'])} (Arizona "
-                f"time), so {first['slots'][0].strftime('%-I:%M %p')} falls "
-                "outside that.")
+        # Name the last START time, not the window close: "Fridays from 10:00
+        # AM to 6:30 PM, so 6:30 PM falls outside that" contradicted itself
+        # and the review blocked it (Marcus, Willetta, 2026-11-11).
+        asked = first["slots"][0]
+        lo, hi = rules.SHOWING_WINDOWS[asked.weekday()]
+        day = asked.strftime("%A")
+        if asked.time() < lo:
+            return (f"My first tour on {day}s starts at {_clock(lo)} (Arizona "
+                    f"time), so {_clock(asked)} is a little early.")
+        last = (datetime.combine(asked.date(), hi)
+                - timedelta(minutes=rules.SHOWING_MINUTES))
+        return (f"My last tour on {day}s starts at {_clock(last)} (Arizona "
+                f"time), so {_clock(asked)} is past that.")
     if all(r in ("too-soon", "past") for r in why):
         return ("I need about two hours' notice to get someone out there, so "
                 f"{when} is too soon.")
@@ -1035,6 +1093,16 @@ def _reason_line(items: list, failures: list) -> str | None:
            for r in why):
         return None
     return f"{when[0].upper()}{when[1:]} is already booked up on my end."
+
+
+def _weekday_evening(item: dict) -> bool:
+    """An exact Mon-Fri ask at or past that day's last tour start."""
+    if item["kind"] != "exact":
+        return False
+    asked = item["slots"][0]
+    lo, _ = rules.SHOWING_WINDOWS[asked.weekday()]
+    return (asked.weekday() < 5 and asked.time() >= lo
+            and not rules.in_window(asked))
 
 
 def _day_reason(d, now_az) -> str | None:
@@ -1368,13 +1436,27 @@ def book_proposed_time(thread_id, doc, first_name, address, relay, cls,
         kw = dict(now_az=now_az, declined_iso=rf["declined_iso"],
                   earliest_daily=rf["earliest_daily"],
                   latest_daily=rf["latest_daily"])
-        per_day = 2 if len(days) == 1 else 1
-        for d in days:
-            slots += cal.counter_slots(address, events, count=per_day,
-                                       only_dates={d}, **kw)
-            if len(slots) >= 2:
-                break
-        slots = slots[:2]
+        late = items[0]["date"] if items and _weekday_evening(items[0]) else None
+        if late:
+            # A weekday time past closing gets that week's Saturday (Sunday if
+            # Saturday is full); a weekday morning is no use to someone asking
+            # for the evening (Marcus 2026-11-11, "Friday at 630pm" at
+            # Willetta; Alex: "why aren't we pushing for Saturday", "Should be
+            # automatic. Offer Saturday"). Weekend asks keep their own day
+            # (Crystal 11/6).
+            sat = late + timedelta(days=5 - late.weekday())
+            for d in (sat, sat + timedelta(days=1)):
+                slots = cal.counter_slots(address, events, only_dates={d}, **kw)
+                if slots:
+                    break
+        else:
+            per_day = 2 if len(days) == 1 else 1
+            for d in days:
+                slots += cal.counter_slots(address, events, count=per_day,
+                                           only_dates={d}, **kw)
+                if len(slots) >= 2:
+                    break
+            slots = slots[:2]
         if not slots:
             slots = cal.counter_slots(address, events, **kw)
     except Exception as e:  # noqa: BLE001
