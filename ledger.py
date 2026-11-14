@@ -386,15 +386,6 @@ def blocked_addresses() -> list:
     return []
 
 
-def get_facts(addr_slug: str) -> str | None:
-    try:
-        snap = init_db().collection("property_facts").document(addr_slug).get()
-        return snap.get("raw_md") if snap.exists else None
-    except Exception as e:  # noqa: BLE001
-        log.error("get_facts(%s) failed: %s", addr_slug, e)
-        return None
-
-
 # ------------------------------------------- application attribution (2026-09-17)
 # Alex: "i rented all those houses, not jace". The `agent` field only says who
 # opened the door for a showing. These fields say who took the application and
