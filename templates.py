@@ -2,7 +2,9 @@
 booking, soft application mention, full signature. No em dashes in body copy
 (the signature's em dash is Alex's sanctioned brand exception)."""
 
-APP_LINK = "https://www.arizonaeliteproperties.com/vacancies"
+import facts
+
+APP_LINK = facts.APP_LINK
 
 SIGNATURE = (
     "Alex Foley\n"
@@ -33,18 +35,51 @@ def _lead_block(ack, answer):
     return QUESTION_ACK if ack else ""
 
 
-def availability_ask(first_name, address, ack=False, answer=None):
-    """Template 1 - first reply when no showing exists at the house."""
+APP_LINE = f"You can start an application here whenever you're ready: {APP_LINK}"
+
+
+def first_reply_fallback(first_name, address):
+    """The first reply when the real one could not go out (review block,
+    calendar down, nothing bookable). Fixed text, no scheduling claims, so it
+    can't contradict the renter; Alex was pinged and follows up with times."""
+    return (
+        f"Hi {first_name},\n\n"
+        f"Thanks for reaching out about {address}! Here's the application "
+        f"whenever you're ready: {APP_LINK}\n\n"
+        "I'm checking the calendar for you now and will follow up with tour "
+        "times shortly.\n\n"
+        f"{SIGNATURE}"
+    )
+
+
+def _app_tail(answer):
+    """The soft application line, unless the lead-in already gave the link."""
+    if answer and APP_LINK in answer:
+        return ""
+    return f" You can also start an application here whenever you're ready: {APP_LINK}"
+
+
+def availability_ask(first_name, address, ack=False, answer=None, day=None):
+    """Template 1 - first reply when no showing exists at the house. When the
+    renter already named a day (rules.named_day_without_time), ask for a time
+    on THAT day instead of 'what day and time' (Ashley 2026-10-24)."""
+    if day:
+        ask = (f"Thanks for reaching out about {address}! {day} works, I'd love to "
+               f"get you in to see it.\n\n"
+               f"What time on {day} is best for you, and when are you hoping to move? "
+               "Here's when I have open (Phoenix time):\n\n")
+    else:
+        ask = (f"Thanks for reaching out about {address}! I'd love to get you in to see it.\n\n"
+               "When are you hoping to move, and what day and time works to come take a look? "
+               "Here's when I have open this week (Phoenix time):\n\n")
     return (
         f"Hi {first_name},\n\n"
         + _lead_block(ack, answer)
-        + f"Thanks for reaching out about {address}! I'd love to get you in to see it.\n\n"
-        "When are you hoping to move, and what day and time works to come take a look? "
-        "Here's when I have open this week (Phoenix time):\n\n"
+        + ask +
         f"{WINDOWS_BLOCK}\n"
         "Pick a time that works and I'll lock it in for you. Same-day tours are "
-        "usually doable too if you give me a couple hours' notice. You can also start an "
-        f"application here whenever you're ready: {APP_LINK}\n\n"
+        "usually doable too if you give me a couple hours' notice."
+        + _app_tail(answer) + "\n\n"
         "Looking forward to meeting you!\n\n"
         f"{SIGNATURE}"
     )
@@ -62,9 +97,8 @@ def offer_existing(first_name, address, when_human, ack=False, answer=None):
         "time works for you and I'll get you set up. Here's when I have open this "
         "week (Phoenix time):\n\n"
         f"{WINDOWS_BLOCK}\n"
-        "You can also start an application here whenever you're ready: "
-        f"{APP_LINK}\n\n"
-        "Looking forward to meeting you!\n\n"
+        + (_app_tail(answer).strip() + "\n\n" if _app_tail(answer) else "")
+        + "Looking forward to meeting you!\n\n"
         f"{SIGNATURE}"
     )
 
@@ -106,15 +140,38 @@ def snap_offer(first_name, address, when_human, their_when_human):
     )
 
 
-def counter_proposal(first_name, slots_human):
-    """Template 4 - their time doesn't work; offer the nearest valid slots."""
+def counter_proposal(first_name, slots_human, reason=None):
+    """Template 4 - their time doesn't work; offer the nearest valid slots.
+    `reason` is one plain sentence on why their time can't be booked (Alex
+    2026-11-08: counters without a why were blocked by the review gate)."""
     lines = "\n".join(f"   {s} (Arizona time)" for s in slots_human)
+    why = (f"{reason} Here's what I can do instead:" if reason else
+           "That time doesn't quite work on my end, but here are a couple "
+           "that do:")
     return (
         f"Hi {first_name},\n\n"
-        "Thanks for sending that over! That time doesn't quite work on my end, "
-        "but here are a couple that do:\n\n"
+        f"Thanks for sending that over! {why}\n\n"
         f"{lines}\n\n"
         "Let me know which one works and I'll lock it in.\n\n"
+        f"{SIGNATURE}"
+    )
+
+
+def counter_existing(first_name, address, their_when_human, when_human,
+                     reason=None):
+    """Consolidate before countering (Alex 2026-11-04, Kylinn/Marigold): the
+    renter's own time can't work, but the house already has a showing that
+    day. Offer it plainly, and keep the door open for another time."""
+    why = (f"{reason} We" if reason else
+           f"The time you asked for ({their_when_human}) won't work on my end, "
+           "but we")
+    return (
+        f"Hi {first_name},\n\n"
+        f"Thanks for getting back to me! {why} already have a showing "
+        f"lined up at {address} {when_human} (Arizona time). Can you make that "
+        "one? Just say the word and I'll add you in.\n\n"
+        "If that doesn't fit, send me another day and an exact time and I'll get "
+        "you set up.\n\n"
         f"{SIGNATURE}"
     )
 
@@ -136,14 +193,22 @@ def offer_existing_reply(first_name, when_human):
     )
 
 
-def propose_times(first_name, slots_human, today_closed=False):
+def propose_times(first_name, slots_human, today_closed=False, reason=None):
     """Concrete-slot offer for flexible/repeat vague renters (Alex 2026-08-23:
     never send the same ask twice; an 'anytime today' renter gets times, not
-    a menu). slots_human: 1-2 formatted times."""
+    a menu). slots_human: 1-2 formatted times. `reason` says why the day they
+    named has nothing open (2026-11-05: a Sunday ask got Monday times with no
+    why, and the review blocked it)."""
     lines = "\n".join(f"   {s} (Arizona time)" for s in slots_human)
-    opener = ("Today's showing window has wrapped up on my end, but here's "
-              "the very next opening I have:" if today_closed else
-              "Let's make this easy - here's what I can do:")
+    if today_closed:
+        opener = ("Today's showing window has wrapped up on my end, but here's "
+                  "the very next opening I have:")
+    elif reason:
+        opener = (f"{reason} Here are the next openings I have:"
+                  if len(slots_human) > 1 else
+                  f"{reason} Here's the next opening I have:")
+    else:
+        opener = "Let's make this easy - here's what I can do:"
     neither = "neither works" if len(slots_human) > 1 else "that doesn't work"
     return (
         f"Hi {first_name},\n\n"
