@@ -241,8 +241,10 @@ def _showing_reminders():
         blocked = ledger.blocked_addresses()
     except Exception:  # noqa: BLE001
         blocked = []
+    # No limit: BOOKED never drains (18 today, growing), and Firestore returns the
+    # OLDEST 50 by id, so a cap would silently stop reminders for every new tour.
     q = (db.collection("zillow_threads")
-         .where("state", "==", ledger.BOOKED).limit(50))
+         .where("state", "==", ledger.BOOKED))
     for snap in q.stream():
         doc = snap.to_dict() or {}
         thread_id = snap.id
@@ -303,6 +305,15 @@ def _showing_reminders():
             continue
 
         first_name = doc.get("renter_name") or "there"
+        # Who runs the tour: the showings ledger first (the calendar projection,
+        # updated on reassignment), then the thread doc, then Alex. Jace and
+        # Rhett cover Alex's conflicts again since 2026-11-04, so a reminder
+        # must name the agent on the booking (the 10/23 stale-Rhett reminder
+        # came from the thread doc).
+        try:
+            agent_name = (ledger.get_showing(event_id) or {}).get("agent_name") or agent_name
+        except Exception as e:  # noqa: BLE001
+            log.error("showing agent lookup failed %s: %s", event_id, e)
         agent_name = agent_name or "Alex Foley"
         when_human = cal.fmt_showing_time(start_az)
         if which == "2h":
