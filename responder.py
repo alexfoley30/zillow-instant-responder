@@ -36,7 +36,6 @@ import os
 import re
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from zoneinfo import ZoneInfo
 
 import calendar_logic as cal
 import cron
@@ -47,11 +46,11 @@ import llm
 import rules
 import templates as T
 import website_lead
+from timeutil import AZ_TZ, parse_iso
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("zillow-instant")
 
-AZ_TZ = ZoneInfo("America/Phoenix")
 PORT = int(os.environ.get("PORT", "8080"))
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 # Auth for the watchdog's /reprocess endpoint (separate from the Composio
@@ -115,11 +114,11 @@ def _offer_is_live(doc, now_az) -> bool:
     doc = doc or {}
     if doc.get("state") == ledger.OFFERED:
         return True
+    off = parse_iso(doc.get("offered_start_iso"))
     try:
-        off = doc.get("offered_start_iso")
-        if off and datetime.fromisoformat(off) > now_az:
+        if off is not None and off > now_az:
             return True
-    except (ValueError, TypeError):
+    except TypeError:  # naive vs aware - cannot prove the offer is live
         pass
     return doc.get("last_reply_template") in OFFER_TEMPLATES
 
@@ -932,11 +931,9 @@ def _we_offered(doc, start_az) -> bool:
     (a proposed slot or the standing offer)."""
     doc = doc or {}
     for iso in list(doc.get("proposed_slots_iso") or []) + [doc.get("offered_start_iso")]:
-        try:
-            if iso and datetime.fromisoformat(iso) == start_az:
-                return True
-        except (ValueError, TypeError):
-            continue
+        offered = parse_iso(iso)
+        if offered is not None and offered == start_az:
+            return True
     return False
 
 
@@ -1098,12 +1095,14 @@ def _pick_proposed_slot(doc, cls, renter_text, now_az):
     first future proposal."""
     future = []
     for iso in (doc or {}).get("proposed_slots_iso") or []:
-        try:
-            c_dt = datetime.fromisoformat(iso)
-        except (ValueError, TypeError):
+        c_dt = parse_iso(iso)
+        if c_dt is None:
             continue
-        if c_dt > now_az:
-            future.append(c_dt)
+        try:
+            if c_dt > now_az:
+                future.append(c_dt)
+        except TypeError:  # naive vs aware - unusable, skip
+            continue
     if not future:
         return None
     for c in (cls or {}).get("time_candidates") or []:
