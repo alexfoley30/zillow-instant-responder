@@ -105,3 +105,64 @@ def test_daycare_nearby_is_not_business_ask():
 def test_business_wifi_question_not_fooled():
     # Working from home is not operating a business facility
     assert rule("Is the internet fast enough to work from home?") != "no_business_sublease"
+
+
+# Availability: listed homes are vacant, answer "available now" (Alex 2026-11-04)
+
+def test_move_in_now_sophia():
+    assert rule("Do you have availability for a tour today? when is the "
+                "earliest move in date?") == "move_in_now"
+
+
+def test_move_in_now_variants():
+    for q in ("Is it still available?", "When will the house be available?",
+              "When can we move in?", "What's the available date?",
+              "is this available now?"):
+        assert rule(q) == "move_in_now", q
+
+
+def test_later_move_in_is_not_move_in_now():
+    # Leyna 11/3: asking if a LATER move-in works is a judgment call for Alex
+    assert rule("our move in date wouldn't be until early December. Would that "
+                "work for this current unit at all?") != "move_in_now"
+    assert "Great question" not in facts.ANSWER_LINES["move_in_now"]
+
+
+def test_as_is_not_fooled_by_lead_paint():
+    # 2026-11-08: a lead paint disclosure question got the as-is reply.
+    for q in ("Is there any lead paint in the home?",
+              "Was the house tested for lead-based paint?",
+              "Any lead based paint disclosure?",
+              "Does it have lead-paint?"):
+        assert rule(q) != "as_is", q
+    assert rule("Can we paint the bedroom?") == "as_is"
+
+
+# Application requests get the link + a tour ask, no ack or ping (Trever 2026-11-12)
+
+def test_application_request_trever():
+    assert rule("I'm interested in your property and would like to move forward. "
+                "Can you send me an application for this property?") == "application_request"
+
+
+def test_application_request_variants():
+    for q in ("How do I apply?", "Where can we apply?", "Can I get the application link?",
+              "We're ready to apply, can you email me the application?",
+              "Could you text me an application?"):
+        assert rule(q) == "application_request", q
+
+
+def test_application_request_does_not_steal_other_rules():
+    assert rule("Is it still available? Can you send me an application?") == "move_in_now"
+    assert rule("What's the floor plan? How do I apply?") == "floor_plan"
+    line = facts.ANSWER_LINES["application_request"]
+    assert facts.APP_LINK in line and "Great question" not in line
+
+
+def test_application_answer_does_not_repeat_the_link():
+    import templates as T
+    body = T.availability_ask("Trever", "250 W Queen Creek Rd #102",
+                              answer=facts.ANSWER_LINES["application_request"])
+    assert body.count(facts.APP_LINK) == 1
+    assert "Great question" not in body
+    assert T.availability_ask("Ann", "X St").count(facts.APP_LINK) == 1
