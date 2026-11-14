@@ -24,8 +24,11 @@ Both are Claude Haiku micro-calls and both fail open, so a missing `ANTHROPIC_AP
 degrades to the deterministic guards instead of blocking sends. Set the key in
 production anyway, it is what makes the second look work.
 
-The service is no longer standard-library only: `requirements.txt` pins its four
-dependencies and `render.yaml` builds with `pip install -r requirements.txt`.
+The service is no longer standard-library only: `requirements.txt` pins its six
+dependencies and `render.yaml` builds with `pip install -r requirements.txt`. Two of those
+pins (`certifi`, `grpcio`) exist to keep a compromised CA out of the trust store, and
+`tests/test_trust_stores.py` fails if either slips backward, so read the comments there
+before loosening anything.
 
 ## What's already done (by Claude)
 
@@ -36,6 +39,11 @@ dependencies and `render.yaml` builds with `pip install -r requirements.txt`.
 - `llm.py` - the Haiku micro-calls: `classify_reply()` (with a regex fallback) and the
   pre-send `review_reply()`. Both fail open.
 - `cron.py` - in-process maintenance ticker (retries, nudges, showing reminders)
+- `website_lead.py` - the `POST /hooks/website-lead/<token>` route, which turns a Netlify
+  form submission from boundlessaz.com into one Poke text. Token-in-URL instead of the
+  shared-secret header, because Netlify cannot send one. No `POKE_API_KEY`, no route.
+- `scripts/application.py` - the application and lease attribution tool (see the last
+  section of this file)
 - `render.yaml` - one-file deploy config for Render
 - This runbook
 
@@ -76,10 +84,13 @@ The old key (`ck_7SYX8U2k...`) was pasted into a chat transcript, so treat it as
    - `HANDLED_LABEL_ID` = `Label_6932202305849666189`  (zillow/handled)
    - `WEBHOOK_SECRET` = make up a long random string; use the same value in Step 2's header
 
-   `render.yaml` is the current list of what the service reads, and it declares more
-   than the five above (`COMPOSIO_USER_ID`, `NEEDS_REPLY_LABEL_ID`, `ANTHROPIC_API_KEY`,
-   `POKE_ENDPOINT`, `DRY_RUN`, `GOOGLE_APPLICATION_CREDENTIALS`). Check it before you
-   deploy. The Firestore service-account JSON goes in as a Render secret file.
+   `render.yaml` declares more than the five above (`COMPOSIO_USER_ID`,
+   `NEEDS_REPLY_LABEL_ID`, `ANTHROPIC_API_KEY`, `POKE_ENDPOINT`, `DRY_RUN`,
+   `GOOGLE_APPLICATION_CREDENTIALS`), so check it before you deploy. Four more are read by
+   the code but declared nowhere: `POKE_API_KEY` (without it the website-lead route is
+   off), `REPROCESS_SECRET` (gates `/reprocess` and `/send-approved`),
+   `ALERT_LOG_LABEL_ID`, and `PORT`, which Render sets for you. The Firestore
+   service-account JSON goes in as a Render secret file.
 5. Deploy. Copy the live URL (e.g. `https://zillow-instant-responder.onrender.com`) and
    paste it into the Composio trigger from Step 2.
 
