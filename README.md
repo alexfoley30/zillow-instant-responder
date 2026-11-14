@@ -79,3 +79,28 @@ out in seconds and the thread gets the `zillow/awaiting-renter` label.
 - If you ever want to avoid the monthly host cost, the alternative is running this on an
   always-on office machine behind a Cloudflare Tunnel — more setup, Mac/office-dependent,
   but $0/mo. Ask Claude if you want that path instead.
+
+## Who took the application (added 2026-09-17)
+
+The `agent` field on a `zillow_threads` doc only records who opened the door for the showing.
+Alex: "i rented all those houses, not jace". So a lease is attributed by five fields a person
+writes, never the responder: `application_by`, `application_at`, `application_note`,
+`application_logged_at`, `lease_signed_at`.
+
+```bash
+cd zillow-instant-responder
+# log one (exact match on street number + street words and the renter's first name)
+python3 scripts/application.py log --property "26009 S New Town Dr" --renter Bonnie --by alex --leased 2026-08-27
+# two threads match? the tool lists them; pick one
+python3 scripts/application.py log --thread <thread_id> --by jace --date 2026-09-20
+# see what is logged, or everything on one property
+python3 scripts/application.py show
+python3 scripts/application.py show --property "2118 S El Marino"
+# per-agent: showings (door opened) vs applications taken vs leases signed
+python3 scripts/application.py scoreboard
+```
+
+`--by` accepts a first name (alex, jace, rhett, cody, bre, alexa) or a full name. Dates are
+YYYY-MM-DD and stay empty when unknown; nothing is guessed. Credentials: the service-account
+file at `~/.config/boundless/firebase-sa.json` is used when `GOOGLE_APPLICATION_CREDENTIALS`
+is unset. Run it with the BoundlessPipeline `zillow-venv` python.
