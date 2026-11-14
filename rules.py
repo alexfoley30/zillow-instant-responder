@@ -3,7 +3,15 @@
 Ports the scheduling rules from the sweep SKILL.md into code:
 windows, 2-hour minimum notice, SAME-DAY LADDER (Jace default), drive-time
 gap tiers, away-block detection, same-property matching, agent selection.
+
+Keep this module importable on Python 3.9: scripts/shadow_dump.py runs under
+Apple's /usr/bin/python3 (3.9.6, the only interpreter on the office Mac with
+firebase_admin) and imports these rules rather than re-implementing them. The
+__future__ import below is what makes the PEP 604 `X | None` annotations here
+parse on 3.9; do not add match statements or other 3.10+ syntax.
 """
+
+from __future__ import annotations
 
 import re
 from datetime import datetime, time, timedelta
