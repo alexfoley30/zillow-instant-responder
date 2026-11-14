@@ -99,6 +99,16 @@ def test_addr_slug():
     assert rules.addr_slug("1641 E Coronado Rd, Phoenix, AZ 85006") == "1641-e-coronado-rd"
 
 
+def test_short_address_display_form():
+    # Street line only, trimmed. The trim is the point: the six Poke/calendar
+    # sites that used to inline .split(",")[0] disagreed about it.
+    assert rules.short_address("1294 E Apricot Ln, Gilbert, AZ 85298") == "1294 E Apricot Ln"
+    assert rules.short_address("1294 E Apricot Ln , Gilbert") == "1294 E Apricot Ln"
+    assert rules.short_address("1294 E Apricot Ln") == "1294 E Apricot Ln"
+    assert rules.short_address("") == ""
+    assert rules.short_address(None) == ""
+
+
 # --------------------------------------- weekday snap (8/22 Adam Friday bug)
 
 def _snap(raw, llm_date, now):
