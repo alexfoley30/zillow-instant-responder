@@ -17,8 +17,9 @@ RUN IT WITH APPLE PYTHON. This is not a preference:
     + google-cloud-firestore installed. Homebrew 3.13/3.14 lack them.
   * Because it is 3.9, this file must NOT import ledger/rules/calendar_logic/
     facts/gmail_client/llm - they use PEP 604 `X | None` annotations that
-    raise TypeError at import on 3.9. The ~30 lines we need from rules.py are
-    reimplemented below and must be kept in sync with it.
+    raise TypeError at import on 3.9. The address-matching and window helpers
+    it needs come from rules_core.py, which rules.py also imports and which is
+    deliberately kept 3.9-compatible.
   * Credentials come from the service-account JSON, never ADC (ADC here is
     stale, has no quota_project_id, and hangs ~300s before failing).
 """
@@ -31,7 +32,7 @@ import re
 import subprocess
 import sys
 import warnings
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 warnings.filterwarnings("ignore")  # 3.9 EOL FutureWarning + LibreSSL notice
 # grpc spews "FD from fork parent still in poll list" across stdout when the
@@ -75,47 +76,15 @@ NAMED_CASES = ["Anna", "alondra", "Lyndsey"]
 def is_poke_stage(stage_key):
     return (stage_key or "").startswith("poke__")
 
-# ---- mirrored from rules.py (cannot import it on 3.9) --------------------
-SHOWING_WINDOWS = {           # weekday(): Mon=0 .. Sun=6
-    0: (time(10, 0), time(18, 30)), 1: (time(10, 0), time(15, 0)),
-    2: (time(10, 0), time(18, 30)), 3: (time(10, 0), time(15, 0)),
-    4: (time(10, 0), time(18, 30)), 5: (time(10, 0), time(14, 0)),
-    6: (time(10, 0), time(14, 0)),
-}
-MIN_NOTICE_HOURS = 2
-SHOWING_MINUTES = 30
+# ---- shared with rules.py via rules_core (3.9-safe, no PEP 604) ----------
+# These used to be hand-copied here with a "keep in sync" comment and drifted:
+# the copy matched street numbers by substring (1641 matched 16413) and its
+# in_window had no midnight guard. rules_core is the one implementation.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from rules_core import (  # noqa: E402
+    MIN_NOTICE_HOURS, STREET_TYPES, address_matches, in_window)
+
 KNOWN_AGENTS = {"Alex Foley", "Jace Johnson", "Rhett Lueck"}
-_DIRECTIONALS = {"n", "s", "e", "w", "ne", "nw", "se", "sw",
-                 "north", "south", "east", "west"}
-_STREET_TYPES = {"ave", "avenue", "st", "street", "dr", "drive", "rd", "road",
-                 "ln", "lane", "ct", "court", "blvd", "boulevard", "way",
-                 "pl", "place", "cir", "circle", "trl", "trail", "pkwy",
-                 "parkway", "loop", "ter", "terrace"}
-
-
-def number_and_core(address):
-    """'3309 E San Remo Ave' -> ('3309', 'san remo')."""
-    tokens = re.findall(r"[a-z0-9']+", (address or "").lower())
-    if not tokens or not tokens[0].isdigit():
-        return None, None
-    core = [t for t in tokens[1:]
-            if t not in _DIRECTIONALS and t not in _STREET_TYPES]
-    return tokens[0], " ".join(core)
-
-
-def addr_matches(blocked, address):
-    """Fuzzy match, same semantics as rules.is_blocked_address."""
-    number, core = number_and_core(blocked)
-    if not number or not core:
-        return False
-    a = (address or "").lower()
-    return number in a and core in a
-
-
-def in_window(start):
-    lo, hi = SHOWING_WINDOWS[start.weekday()]
-    end = (start + timedelta(minutes=SHOWING_MINUTES)).time()
-    return lo <= start.time() and end <= hi
 
 
 # ---- read-only guard ----------------------------------------------------
@@ -311,7 +280,7 @@ def check_body(body):
     g = re.match(r"Hi ([^,\n]+),", body or "")
     if g:
         name = g.group(1).strip()
-        if name.lower() in _STREET_TYPES:
+        if name.lower() in STREET_TYPES:
             out.append("greeting says 'Hi %s,' - a street suffix was parsed as "
                        "the renter's first name" % name)
         elif name == "there":
@@ -404,7 +373,7 @@ def check_blocklist(bundle, threads):
         exposed = []
         if not present:
             for t in threads.values():
-                if not addr_matches(addr, t.get("address") or ""):
+                if not address_matches(addr, t.get("address") or ""):
                     continue
                 stages = [e["template"] or e["stage_key"] for e in t["events"]]
                 if any(s == "leased" for s in stages):
