@@ -28,6 +28,7 @@ import facts  # noqa: E402
 import gmail_client as gm  # noqa: E402
 import responder  # noqa: E402
 import rules  # noqa: E402
+import templates as T  # noqa: E402
 
 AZ = rules.AZ_TZ
 
@@ -909,3 +910,102 @@ def test_classify_falls_back_to_regex_when_the_model_is_unavailable(monkeypatch)
     now = datetime(2026, 9, 24, 10, 0, tzinfo=AZ)
     out = responder.llm.classify_reply("I can't make it, need to cancel", "", now)
     assert out["intent"] == "cancellation" and out["_fallback"] is True
+
+
+def _stub_anthropic(monkeypatch, payload):
+    """Stub the anthropic client the way test_review_movein does, returning
+    `payload` as the single text block."""
+    import json as _json
+    import sys as _sys
+    import types as _types
+    seen = {}
+
+    class _Msgs:
+        def create(self, **kw):
+            seen["prompt"] = kw["messages"][0]["content"]
+            seen["max_tokens"] = kw["max_tokens"]
+            seen["schema"] = kw["output_config"]["format"]["schema"]
+            block = _types.SimpleNamespace(type="text", text=_json.dumps(payload))
+            return _types.SimpleNamespace(content=[block])
+
+    class _Client:
+        def __init__(self, **kw):
+            seen["client_kwargs"] = kw
+            self.messages = _Msgs()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setitem(_sys.modules, "anthropic",
+                        _types.SimpleNamespace(Anthropic=_Client))
+    return seen
+
+
+def test_json_call_returns_the_parsed_object_on_success(monkeypatch):
+    # The success path needs a test that a fail-open cannot satisfy. Returning
+    # None from _json_call makes classify fall back to regex and review_reply
+    # fail open to "send" - both safe, so nothing else in the suite notices,
+    # while in production the model would have silently stopped being consulted.
+    seen = _stub_anthropic(monkeypatch, {"verdict": "block", "reason": "wrong time"})
+    out = responder.llm._json_call("the prompt", {"type": "object"}, 256)
+    assert out == {"verdict": "block", "reason": "wrong time"}
+    assert seen["prompt"] == "the prompt"
+    assert seen["max_tokens"] == 256
+    assert seen["schema"] == {"type": "object"}
+
+
+def test_json_call_passes_the_load_bearing_client_pins(monkeypatch):
+    # The pins used to exist twice, once per call site. One place now, so this
+    # is where they get asserted.
+    seen = _stub_anthropic(monkeypatch, {})
+    responder.llm._json_call("p", {"type": "object"}, 8)
+    assert seen["client_kwargs"]["timeout"] == 10.0
+    assert seen["client_kwargs"]["max_retries"] == 1
+
+
+def test_review_reply_block_survives_the_shared_call(monkeypatch):
+    # "block" is the one verdict a fail-open can never produce, so this proves
+    # a real parsed response reached review_reply through _json_call.
+    _stub_anthropic(monkeypatch, {"verdict": "block", "reason": "declined slot"})
+    out = responder.llm.review_reply("transcript", "body", "booking_new")
+    assert out == {"verdict": "block", "reason": "declined slot"}
+
+
+def test_classify_uses_the_model_result_through_the_shared_call(monkeypatch):
+    _stub_anthropic(monkeypatch, {"intent": "accept_offer", "time_candidates": [],
+                                  "wants_same_day": False, "question_text": None})
+    now = datetime(2026, 11, 14, 10, 0, tzinfo=AZ)
+    out = responder.llm.classify_reply("yes that works", "", now)
+    assert out["intent"] == "accept_offer"
+    assert not out.get("_fallback"), "should be the model result, not the regex fallback"
+
+
+def test_routing_bookings_through_send_stage_does_not_alter_the_email(monkeypatch):
+    """The bookers used to call gm.send_reply directly, so they bypassed
+    send_stage's first_reply app-link injection. A first message naming a
+    bookable time does reach the create branch with stage="first_reply"
+    (_handle_new_inquiry -> _retry_on_their_day -> book_proposed_time ->
+    _book_valid_slot), so routing them through send_stage could have changed
+    what a renter receives. It does not: booking_confirmation already carries
+    the link, so the injection is a no-op. Pinned because a template edit that
+    dropped the link would start appending it to booking confirmations."""
+    body = T.booking_confirmation("Sam", "123 Main St, Mesa, AZ",
+                                  "today, Monday, at 5:00 PM", "Alex Foley")
+    assert T.APP_LINK in body, "booking_confirmation must carry the app link itself"
+
+    seen = {}
+    monkeypatch.setattr(responder, "dry_run", lambda: False)
+    monkeypatch.setattr(responder, "review_gate", lambda t, b, k: (True, ""))
+    monkeypatch.setattr(responder.ledger, "reserve_send", lambda t, s, m: "acquired")
+    monkeypatch.setattr(responder.ledger, "content_hash", lambda b: "h")
+    monkeypatch.setattr(responder.ledger, "mark_sent", lambda t, s, **k: None)
+    monkeypatch.setattr(responder.ledger, "upsert_thread", lambda t, **k: None)
+    monkeypatch.setattr(responder.gm, "modify_labels", lambda *a, **k: None)
+    monkeypatch.setattr(responder.gm, "send_reply",
+                        lambda t, r, b: seen.__setitem__("body", b))
+
+    for stage in ("first_reply", "first_reply__retry", f"reply__m1"):
+        seen.clear()
+        out = responder.send_stage("t", stage, "x@convo.zillow.com", body,
+                                   [], [], {"template": "booking_new"}, "m1",
+                                   before_send=lambda: {"event_id": "ev1"})
+        assert out == "sent"
+        assert seen["body"] == body, f"send_stage rewrote the body on stage={stage}"
