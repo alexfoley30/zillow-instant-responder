@@ -931,11 +931,9 @@ def _we_offered(doc, start_az) -> bool:
     (a proposed slot or the standing offer)."""
     doc = doc or {}
     for iso in list(doc.get("proposed_slots_iso") or []) + [doc.get("offered_start_iso")]:
-        try:
-            if iso and datetime.fromisoformat(iso) == start_az:
-                return True
-        except (ValueError, TypeError):
-            continue
+        offered = parse_iso(iso)
+        if offered is not None and offered == start_az:
+            return True
     return False
 
 
@@ -1097,12 +1095,14 @@ def _pick_proposed_slot(doc, cls, renter_text, now_az):
     first future proposal."""
     future = []
     for iso in (doc or {}).get("proposed_slots_iso") or []:
-        try:
-            c_dt = datetime.fromisoformat(iso)
-        except (ValueError, TypeError):
+        c_dt = parse_iso(iso)
+        if c_dt is None:
             continue
-        if c_dt > now_az:
-            future.append(c_dt)
+        try:
+            if c_dt > now_az:
+                future.append(c_dt)
+        except TypeError:  # naive vs aware - unusable, skip
+            continue
     if not future:
         return None
     for c in (cls or {}).get("time_candidates") or []:
