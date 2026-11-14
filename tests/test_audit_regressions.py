@@ -599,7 +599,7 @@ def _snap_harness(monkeypatch, doc, propose_hhmm):
     """Run book_proposed_time against the Chelsea event with everything
     side-effectful recorded instead of executed."""
     calls = {"send_stage": [], "created": [], "folded": [], "transitions": [],
-             "replies": []}
+             "replies": [], "reserved": []}
     ev = _chelsea_event()
     now, _ = _wed_ctx()
     d = _next_wed()
@@ -616,7 +616,8 @@ def _snap_harness(monkeypatch, doc, propose_hhmm):
             calls["send_stage"].append((stage, meta.get("template"), body))
             or "sent")
     monkeypatch.setattr(responder.ledger, "reserve_send",
-                        lambda t, s, m: "acquired")
+                        lambda t, s, m: calls["reserved"].append((s, m))
+                        or "acquired")
     monkeypatch.setattr(responder.ledger, "mark_sent", lambda *a, **k: None)
     monkeypatch.setattr(responder.ledger, "mark_failed", lambda *a, **k: None)
     monkeypatch.setattr(
@@ -675,6 +676,78 @@ def test_snap_fires_once_then_renters_time_books(monkeypatch):
     assert calls["folded"] == [] and len(calls["created"]) == 1
     assert not any(t == "offer_existing_snap"
                    for _, t, _ in calls["send_stage"])
+
+
+# ---------------------------------------------------------------- 2026-09-08
+# The three booking paths (book_proposed_time, its adjacency-snap fold, and
+# book_accepted_offer) each carried their own copy of the send-lock ladder and
+# reserved with a bare {"template": ...}. Booking confirmations were then the
+# one class of send with no body_sha256 (shadow_dump's double-send detector
+# keys on it) and no trigger_message_id (cron._recover_stuck feeds it to
+# alex_replied_after; empty falls back to the coarse "is the last message from
+# Alex" check instead of the real "did Alex reply after the trigger"). All of
+# them now build meta via responder.send_meta and claim the lock via
+# responder.claim_send, so the audit fields cannot drift apart again.
+
+def test_new_booking_reserves_with_full_audit_meta(monkeypatch):
+    doc = {"last_reply_template": "offer_existing_snap", "snap_offered": True}
+    out, calls = _snap_harness(monkeypatch, doc, "16:00")
+    assert out == "sent" and len(calls["created"]) == 1
+    stage, meta = calls["reserved"][0]
+    assert stage == "reply__m9"
+    assert meta["template"] == "booking_new"
+    assert meta["trigger_message_id"] == "m9"
+    assert meta["to_relay"] == "x@convo.zillow.com"
+    assert meta["body_sha256"] == responder.ledger.content_hash(calls["replies"][0])
+
+
+def test_snap_fold_reserves_with_full_audit_meta(monkeypatch):
+    doc = {"last_reply_template": "offer_existing"}
+    out, calls = _snap_harness(monkeypatch, doc, "15:18")
+    assert out == "sent" and calls["folded"] == [("evC", "Sam")]
+    stage, meta = calls["reserved"][0]
+    assert stage == "reply__m9"
+    assert meta["template"] == "booking_fold_snap"
+    assert meta["trigger_message_id"] == "m9"
+    assert meta["to_relay"] == "x@convo.zillow.com"
+    assert meta["body_sha256"] == responder.ledger.content_hash(calls["replies"][0])
+
+
+def test_accepted_offer_reserves_with_full_audit_meta(monkeypatch):
+    reserved, replies = [], []
+    d = _next_wed()
+    hit = {"event": _chelsea_event(),
+           "start_az": datetime(d.year, d.month, d.day, 15, 15, tzinfo=AZ),
+           "when_human": "Wednesday, at 3:15 PM"}
+    monkeypatch.setattr(responder, "_newer_renter_message_exists",
+                        lambda t, m: False)
+    monkeypatch.setattr(responder, "dry_run", lambda: False)
+    monkeypatch.setattr(responder, "review_gate", lambda t, b, k: (True, ""))
+    monkeypatch.setattr(responder.cal, "find_existing_showings",
+                        lambda addr: [hit])
+    monkeypatch.setattr(responder.cal, "agent_name_from_event",
+                        lambda e: "Rhett Lueck")
+    monkeypatch.setattr(responder.cal, "fold_renter_into_event",
+                        lambda event, name: "evC")
+    monkeypatch.setattr(responder.ledger, "reserve_send",
+                        lambda t, s, m: reserved.append((s, m)) or "acquired")
+    monkeypatch.setattr(responder.ledger, "mark_sent", lambda *a, **k: None)
+    monkeypatch.setattr(responder.ledger, "transition", lambda *a, **k: None)
+    monkeypatch.setattr(responder.gm, "send_reply",
+                        lambda t, r, b: replies.append(b))
+    monkeypatch.setattr(responder.gm, "modify_labels", lambda *a, **k: None)
+    monkeypatch.setattr(responder.gm, "poke_ping", lambda m: None)
+
+    out = responder.book_accepted_offer(
+        "t1", {"offered_event_id": "evC"}, "Sam",
+        "2118 S El Marino, Mesa, AZ, 85202", "x@convo.zillow.com", "m9")
+    assert out == "sent"
+    stage, meta = reserved[0]
+    assert stage == "booked__evC"
+    assert meta["template"] == "booking_fold"
+    assert meta["trigger_message_id"] == "m9"
+    assert meta["to_relay"] == "x@convo.zillow.com"
+    assert meta["body_sha256"] == responder.ledger.content_hash(replies[0])
 
 
 
