@@ -14,13 +14,27 @@ New Zillow email lands in alex@azfoleyhomes.com
 Renter has a reply in a few seconds, 24/7, independent of Alex's Mac.
 ```
 
-No AI in the hot path = no token cost, no Anthropic key, dirt cheap to run.
-`responder.py` is pure Python standard library — no pip install, no build step.
+That was the v1 instant layer. The v2 rebuild (2026-07-28) folded the smart
+layer into this same service, so the description above covers only the first
+reply. The service now also classifies renter replies, books showings and keeps
+a Firestore ledger, which means it is no longer dependency-free: `requirements.txt`
+is real and `render.yaml` runs `pip install -r requirements.txt` as the build step.
+Haiku micro-calls in `llm.py` need `ANTHROPIC_API_KEY`, and Firestore needs
+`GOOGLE_APPLICATION_CREDENTIALS`. See the module docstring at the top of
+`responder.py` for the full env list and the per-message flow.
 
 ## What's already done (by Claude)
 
-- `responder.py` — the full webhook receiver + reply logic (idempotent, secret-verified)
-- `render.yaml` — one-file deploy config for Render
+- `responder.py` - HTTP handler, routing and the send gates (idempotent, secret-verified)
+- `gmail_client.py` - Composio calls, thread fetch, payload parsing, Poke pings
+- `ledger.py` - Firestore ledger: create-once send locks and thread state
+- `llm.py` - Haiku classify/extract plus the outgoing-reply review gate
+- `rules.py`, `templates.py`, `calendar_logic.py`, `facts.py`, `cron.py` - decision
+  rules, reply copy, availability math, property facts, the background ticker
+- `website_lead.py` - the `/hooks/website-lead/<token>` route for Netlify form leads
+- `scripts/` - operator CLIs (`application.py`, `sync_facts.py`, `shadow_dump.py`)
+- `tests/` - `python -m pytest -q` from the repo root
+- `render.yaml` - one-file deploy config for Render
 - This runbook
 
 ## What only YOU can do (firm reasons)
@@ -64,7 +78,8 @@ The old key (`ck_7SYX8U2k...`) was pasted into a chat transcript, so treat it as
 
 ### Step 4 — Test
 
-Hit the URL in a browser — you should see `zillow-instant-responder ok` (health check).
+Hit the URL in a browser — you should see `zillow-pipeline ok (dry_run=true)` (health
+check; the flag follows the `DRY_RUN` env var).
 Then send a test Zillow-style inquiry (or wait for a real one) and confirm a reply goes
 out in seconds and the thread gets the `zillow/awaiting-renter` label.
 
@@ -73,7 +88,8 @@ out in seconds and the thread gets the `zillow/awaiting-renter` label.
 - The exact Composio v3 execute endpoint path and trigger payload shape can drift with
   their API version. `responder.py` is defensive about payload shape, but if the first
   real trigger logs a parse miss, send Claude the logged payload and it'll adjust
-  `extract_event()` in one edit.
+  `extract_event()` in one edit. That parser lives in `gmail_client.py` now, not in
+  `responder.py`; subject parsing is `parse_subject()` in `responder.py`.
 - Once this is live and confirmed, the 5-minute sweep can be slowed to ~10-15 min (it's
   now just a backstop for booking replies), cutting cost further. Tell Claude when ready.
 - If you ever want to avoid the monthly host cost, the alternative is running this on an
