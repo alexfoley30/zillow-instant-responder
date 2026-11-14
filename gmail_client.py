@@ -11,9 +11,12 @@ import json
 import logging
 import os
 import re
+import ssl
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+
+import certifi
 
 log = logging.getLogger("zillow-instant.gmail")
 
@@ -26,20 +29,28 @@ ALEX_EMAIL = "alex@azfoleyhomes.com"
 
 POKE_ENDPOINT = os.environ.get("POKE_ENDPOINT", "")
 
+# Verify against the pinned certifi bundle, not Render's OS store: we control
+# when certifi updates (2026-10-23: eMudhra compromise, see requirements.txt).
+TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
 
 def _post_json(url: str, payload: dict, headers: dict, timeout: int) -> bytes:
     """POST a JSON body and hand back the RAW response bytes.
 
-    Four call sites in this module (two inside composio_execute, two inside
-    poke_ping) each hand-rolled this same Request/urlopen pair. It returns
-    bytes rather than parsed JSON on purpose: poke_ping's v2 branch counts a
-    2xx as delivered without looking at the body, and parsing here would turn
-    a non-JSON success into a spurious failure.
+    The ONE place the pinned TLS_CONTEXT is applied to an outbound POST. Four
+    call sites (two in composio_execute, two in poke_ping) each hand-rolled
+    this Request/urlopen pair, so the certifi pin had to be remembered four
+    times; a fifth caller forgetting it would silently fall back to Render's
+    OS store (2026-10-23, eMudhra).
+
+    It returns bytes rather than parsed JSON on purpose: poke_ping's v2 branch
+    counts a 2xx as delivered without looking at the body, and parsing here
+    would turn a non-JSON success into a spurious failure.
     """
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), method="POST",
         headers={"Content-Type": "application/json", **headers})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=timeout, context=TLS_CONTEXT) as r:
         return r.read()
 
 
@@ -254,6 +265,12 @@ def _phrase(*words):
     return r"\s+".join(words)
 
 
+_RENTER_MESSAGE_RE = re.compile(
+    r"RENTER\W{1,8}S\s+MESSAGE\s*(?P<msg>.+)", re.IGNORECASE | re.DOTALL)
+
+# Zillow's hidden notification id closes the reply email.
+_NOTIFICATION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
 RENTER_SAYS_RE = re.compile(
     r"says:\s*(?P<msg>.+?)(?:" + "|".join([
         _phrase("Reply", "to", r"\w"),
@@ -337,8 +354,16 @@ def extract_renter_text(m: dict) -> str:
     from a renter ...') and any quoted history."""
     body = msg_body(m)
     hit = RENTER_SAYS_RE.search(body)
+    labeled = _RENTER_MESSAGE_RE.search(body)
     if hit:
         text = hit.group("msg")
+    elif labeled:
+        # Reply format with a "RENTER'S MESSAGE" box: the full words live
+        # there. The top of the body is Zillow's hidden preview, cut off at
+        # ~150 chars (Natalie 2026-11-08: "How does..." lost "11 sound?").
+        text = labeled.group("msg")
+        cut = _CUT_RE.search(text)
+        text = text[:cut.start()] if cut else text
     else:
         cut = _CUT_RE.search(body)
         text = body[:cut.start()] if cut else body
@@ -352,7 +377,7 @@ def extract_renter_text(m: dict) -> str:
             continue
         if s.startswith(">") or (s.startswith("On ") and s.endswith("wrote:")):
             break
-        if _CHROME_RE.search(s):
+        if _CHROME_RE.search(s) or _NOTIFICATION_ID_RE.match(s):
             break
         lines.append(s)
         if len(lines) > 30:
