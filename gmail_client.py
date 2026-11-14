@@ -483,6 +483,35 @@ def poke_ping(message: str) -> bool:
         return False
 
 
+def escalate(subject: str, message: str, email_note: str = "",
+             poke_prefix: str = "") -> bool:
+    """Get a human's attention over BOTH channels, and report whether either
+    landed. Poke has returned success while delivering nothing (2026-08-23),
+    so a ping alone is not evidence anyone was told; the email is the backup.
+
+    `message` goes to both. `email_note` is appended to the email only - the
+    ping becomes a text message, and standing instructions that only make
+    sense in an inbox do not belong in one. `poke_prefix` goes on the text
+    only (the NUDGE relay instruction, which would be noise in an email).
+
+    Returns True if at least one channel got through. Callers that rate-limit
+    themselves must stamp the limit only on a True (bug-echo 2026-08-27:
+    stamping on a double failure suppressed the retry and the escalation
+    vanished with only Render logs to show for it)."""
+    delivered = False
+    try:
+        delivered = bool(poke_ping(poke_prefix + message))
+    except Exception as e:  # noqa: BLE001
+        log.error("escalation ping failed: %s", e)
+    try:
+        delivered = bool(alert_email(subject, message + email_note)) or delivered
+    except Exception as e:  # noqa: BLE001
+        log.error("escalation alert email failed: %s", e)
+    if not delivered:
+        log.error("ESCALATION UNDELIVERED on BOTH channels: %s", subject)
+    return delivered
+
+
 # ---------------------------------------------------------------- webhook payload
 
 def extract_event(payload: dict):
