@@ -231,3 +231,19 @@ def test_email_only_note_never_reaches_the_text_message(monkeypatch):
     gm.escalate("subj", "core message", "\n\nlong inbox-only footer")
     assert seen["ping"] == "core message"
     assert seen["email"] == "core message\n\nlong inbox-only footer"
+
+
+def test_poke_prefix_rides_on_the_text_only(monkeypatch):
+    """NUDGE is a Poke relay instruction (Victor 2026-10-27: Poke paraphrased
+    an escalation into something that read like a repair request). It has
+    no meaning in an email, so it must never reach the inbox copy."""
+    import gmail_client as gm
+    seen = {}
+    monkeypatch.setattr(gm, "poke_ping",
+                        lambda m: seen.__setitem__("ping", m) or True)
+    monkeypatch.setattr(gm, "alert_email",
+                        lambda s, b: seen.__setitem__("email", b) or True)
+    gm.escalate("subj", "core message", email_note="\n\nfooter",
+                poke_prefix="NUDGE\n")
+    assert seen["ping"] == "NUDGE\ncore message"
+    assert seen["email"] == "core message\n\nfooter"
