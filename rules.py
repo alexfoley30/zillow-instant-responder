@@ -52,6 +52,17 @@ def number_and_core(address: str):
     return tokens[0], " ".join(core)
 
 
+def street_line(address: str) -> str:
+    """'1110 E Redfield Rd, Tempe, AZ, 85283' -> '1110 E Redfield Rd'.
+
+    The single place the street line is carved off an address. Every Poke
+    text, calendar summary and address key used to run its own
+    .split(",")[0] - some with .strip(), some without - so the same address
+    rendered two ways depending on which call site you landed in.
+    """
+    return (address or "").split(",")[0].strip()
+
+
 def _number_present(number: str, haystack: str) -> bool:
     """Whole-token street-number match: '1641' must not match inside '16413'
     (regression test caught the substring version blocking the wrong house)."""
@@ -60,7 +71,7 @@ def _number_present(number: str, haystack: str) -> bool:
 
 def same_property(address: str, haystack: str) -> bool:
     """Same-property-only rule: BOTH street number and street-name core present."""
-    number, core = number_and_core((address or "").split(",")[0])
+    number, core = number_and_core(street_line(address))
     if not number or not core:
         return False
     hay = (haystack or "").lower()
@@ -69,7 +80,7 @@ def same_property(address: str, haystack: str) -> bool:
 
 def addr_slug(address: str) -> str:
     """'1641 E Coronado Rd, Phoenix...' -> '1641-e-coronado-rd' (fact-sheet key)."""
-    street = (address or "").split(",")[0].strip().lower()
+    street = street_line(address).lower()
     return re.sub(r"[^a-z0-9]+", "-", street).strip("-")
 
 
