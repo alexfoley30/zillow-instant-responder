@@ -222,7 +222,12 @@ _CLOCK_TIME = re.compile(
 
 _DAY_WORD = re.compile(
     r"\b(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?s?\b"
-    r"|\b(?:today|tonight|tomorrow|weekend)\b", re.I)
+    r"|\b(?:today|tonight|tomorrow|weekend)\b"
+    # Aaliyah 2026-11-11: "a tour on Nov 16" named no weekday, so the first
+    # message was never read for a day and the plain ask got blocked.
+    r"|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?"
+    r"|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}"
+    r"(?:st|nd|rd|th)?\b|\b\d{1,2}/\d{1,2}\b", re.I)
 
 
 def has_schedule_hint(text: str) -> bool:
