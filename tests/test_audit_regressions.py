@@ -803,9 +803,9 @@ def test_commit_booking_records_start_and_agent_on_every_path(monkeypatch):
     # a booking with no booked_start_iso and no agent on the thread doc.
     calls = _commit_harness(monkeypatch)
     out = responder._commit_booking(
-        "t1", "reply__m1", "x@convo.zillow.com", "Sam", "2118 S El Marino",
-        "m1", when_human="Wednesday, September 9, at 3:15 PM",
-        agent_name="Rhett Lueck", template="booking_fold_snap",
+        "t1", "reply__m1", "x@convo.zillow.com", "You're all set for Wed 3:15.",
+        template="booking_fold_snap", message_id="m1",
+        agent_name="Rhett Lueck",
         calendar_op=lambda: "evC", ping="Booked (joined existing). [FYI]",
         booked_start_iso="2026-09-09T15:15:00-07:00", snap_offered=True)
     assert out == "sent"
@@ -829,9 +829,8 @@ def test_commit_booking_keeps_event_id_when_the_send_fails(monkeypatch):
 
     calls = _commit_harness(monkeypatch, send_reply=boom)
     out = responder._commit_booking(
-        "t1", "booked__evC", "x@convo.zillow.com", "Sam", "2118 S El Marino",
-        "m1", when_human="Wednesday, September 9, at 3:15 PM",
-        agent_name="Rhett Lueck", template="booking_fold",
+        "t1", "booked__evC", "x@convo.zillow.com", "You're all set for Wed 3:15.",
+        template="booking_fold", message_id="m1", agent_name="Rhett Lueck",
         calendar_op=lambda: "evC", ping="unused",
         booked_start_iso="2026-09-09T15:15:00-07:00")
     assert out == "skipped:send-failed-event-created"
@@ -850,9 +849,8 @@ def test_commit_booking_never_sends_when_the_calendar_fails(monkeypatch):
         raise RuntimeError("composio 400")
 
     out = responder._commit_booking(
-        "t1", "reply__m1", "x@convo.zillow.com", "Sam", "2118 S El Marino",
-        "m1", when_human="Wednesday, September 9, at 3:15 PM",
-        agent_name="Alex Foley", template="booking_new",
+        "t1", "reply__m1", "x@convo.zillow.com", "You're all set for Wed 3:15.",
+        template="booking_new", message_id="m1", agent_name="Alex Foley",
         calendar_op=boom, ping="unused")
     assert out == "skipped:event-failed"
     assert replies == [] and calls["transitions"] == []
