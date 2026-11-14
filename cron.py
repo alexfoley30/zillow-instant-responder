@@ -68,10 +68,23 @@ def _recover_stuck():
                 ledger.mark_abandoned(thread_id, stage_key, f"thread {state}")
                 log.info("stale send abandoned (thread %s): %s", state, key)
                 continue
+            # A pre-send review block is not a half-sent reply: nothing left
+            # the building and review_gate already escalated it once. Before
+            # 2026-10-26 these sat as "failed", came back every tick, and
+            # mailed Alex "Needs you: stuck send" every 20 minutes for days
+            # (201 in a week, two threads: a blocked first reply for a renter
+            # already booked, and a blocked reminder for a past showing).
+            if str(data.get("error", "")).startswith("review-blocked"):
+                ledger.mark_abandoned(thread_id, stage_key,
+                                      "review-blocked, escalated at block time")
+                log.info("review-blocked send closed out: %s", key)
+                continue
             msgs = gm.fetch_thread(thread_id)
             if gm.alex_replied_after(msgs, data.get("trigger_message_id", "")):
                 ledger.mark_sent(thread_id, stage_key, recovered="cron-backfill")
                 log.info("stuck send backfilled from Gmail: %s", key)
+            elif data.get("stuck_alerted_at"):
+                continue  # told Alex once already; wait for him or the 7-day close
             else:
                 # Never auto-resend from cron: an untraceable half-sent state
                 # goes to a human instead of risking a duplicate. And a human
@@ -91,6 +104,7 @@ def _recover_stuck():
                     gm.alert_email(f"Needs you: stuck send {thread_id}", note)
                 except Exception as e:  # noqa: BLE001
                     log.error("stuck-send alert email failed: %s", e)
+                ledger.mark_stuck_alerted(thread_id, stage_key)
         except Exception as e:  # noqa: BLE001
             log.error("recover check failed %s: %s", key, e)
 
@@ -220,8 +234,10 @@ def _showing_reminders():
         blocked = ledger.blocked_addresses()
     except Exception:  # noqa: BLE001
         blocked = []
+    # No limit: BOOKED never drains (18 today, growing), and Firestore returns the
+    # OLDEST 50 by id, so a cap would silently stop reminders for every new tour.
     q = (db.collection("zillow_threads")
-         .where("state", "==", ledger.BOOKED).limit(50))
+         .where("state", "==", ledger.BOOKED))
     for snap in q.stream():
         doc = snap.to_dict() or {}
         thread_id = snap.id
@@ -282,6 +298,15 @@ def _showing_reminders():
             continue
 
         first_name = doc.get("renter_name") or "there"
+        # Who runs the tour: the showings ledger first (the calendar projection,
+        # updated on reassignment), then the thread doc, then Alex. Jace and
+        # Rhett cover Alex's conflicts again since 2026-11-04, so a reminder
+        # must name the agent on the booking (the 10/23 stale-Rhett reminder
+        # came from the thread doc).
+        try:
+            agent_name = (ledger.get_showing(event_id) or {}).get("agent_name") or agent_name
+        except Exception as e:  # noqa: BLE001
+            log.error("showing agent lookup failed %s: %s", event_id, e)
         agent_name = agent_name or "Alex Foley"
         when_human = cal.fmt_showing_time(start_az)
         if which == "2h":

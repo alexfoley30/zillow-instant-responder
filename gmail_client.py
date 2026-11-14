@@ -11,9 +11,12 @@ import json
 import logging
 import os
 import re
+import ssl
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+
+import certifi
 
 from timeutil import parse_iso
 
@@ -27,6 +30,10 @@ COMPOSIO_USER_ID = os.environ.get("COMPOSIO_USER_ID", "")
 ALEX_EMAIL = "alex@azfoleyhomes.com"
 
 POKE_ENDPOINT = os.environ.get("POKE_ENDPOINT", "")
+
+# Verify against the pinned certifi bundle, not Render's OS store: we control
+# when certifi updates (2026-10-23: eMudhra compromise, see requirements.txt).
+TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
 def composio_execute(tool_slug: str, arguments: dict) -> dict:
@@ -43,7 +50,7 @@ def composio_execute(tool_slug: str, arguments: dict) -> dict:
         headers={"x-api-key": COMPOSIO_API_KEY, "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=20, context=TLS_CONTEXT) as r:
             res = json.loads(r.read())
         # Composio's calendar validator is mid-rollout (2026-08-28..30): some
         # instances take the documented string enum for send_updates, others
@@ -65,7 +72,7 @@ def composio_execute(tool_slug: str, arguments: dict) -> dict:
                 headers={"x-api-key": COMPOSIO_API_KEY,
                          "Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req2, timeout=20) as r2:
+            with urllib.request.urlopen(req2, timeout=20, context=TLS_CONTEXT) as r2:
                 return json.loads(r2.read())
         return res
     except urllib.error.HTTPError as e:
@@ -251,6 +258,12 @@ def _phrase(*words):
     return r"\s+".join(words)
 
 
+_RENTER_MESSAGE_RE = re.compile(
+    r"RENTER\W{1,8}S\s+MESSAGE\s*(?P<msg>.+)", re.IGNORECASE | re.DOTALL)
+
+# Zillow's hidden notification id closes the reply email.
+_NOTIFICATION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
 RENTER_SAYS_RE = re.compile(
     r"says:\s*(?P<msg>.+?)(?:" + "|".join([
         _phrase("Reply", "to", r"\w"),
@@ -334,8 +347,16 @@ def extract_renter_text(m: dict) -> str:
     from a renter ...') and any quoted history."""
     body = msg_body(m)
     hit = RENTER_SAYS_RE.search(body)
+    labeled = _RENTER_MESSAGE_RE.search(body)
     if hit:
         text = hit.group("msg")
+    elif labeled:
+        # Reply format with a "RENTER'S MESSAGE" box: the full words live
+        # there. The top of the body is Zillow's hidden preview, cut off at
+        # ~150 chars (Natalie 2026-11-08: "How does..." lost "11 sound?").
+        text = labeled.group("msg")
+        cut = _CUT_RE.search(text)
+        text = text[:cut.start()] if cut else text
     else:
         cut = _CUT_RE.search(body)
         text = body[:cut.start()] if cut else body
@@ -349,7 +370,7 @@ def extract_renter_text(m: dict) -> str:
             continue
         if s.startswith(">") or (s.startswith("On ") and s.endswith("wrote:")):
             break
-        if _CHROME_RE.search(s):
+        if _CHROME_RE.search(s) or _NOTIFICATION_ID_RE.match(s):
             break
         lines.append(s)
         if len(lines) > 30:
@@ -444,7 +465,7 @@ def poke_ping(message: str) -> bool:
                 method="POST",
                 headers={"Content-Type": "application/json",
                          "Authorization": f"Bearer {POKE_API_KEY}"})
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=10, context=TLS_CONTEXT) as r:
                 r.read()
                 return True
         except Exception as e:  # noqa: BLE001
@@ -457,7 +478,7 @@ def poke_ping(message: str) -> bool:
             POKE_ENDPOINT,
             data=json.dumps({"message": message}).encode(),
             method="POST", headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=10, context=TLS_CONTEXT) as r:
             return json.loads(r.read()).get("success", False)
     except Exception as e:  # noqa: BLE001
         log.error("poke_ping failed: %s", e)
