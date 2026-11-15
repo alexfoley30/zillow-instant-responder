@@ -184,15 +184,6 @@ def away_events(events: list, day_az) -> list:
     return out
 
 
-def away_block_status(events_that_day: list) -> str:
-    """'blocked' or 'clear'. Alex shows every house himself since 2026-10-25
-    ("make all showings for me moving forward. My team ... aren't renting
-    them out"), so any away event on his calendar blocks the day; there is
-    no team cover any more. Renter never hears why - callers phrase it as
-    'booked up'."""
-    return "blocked" if away_events(events_that_day, None) else "clear"
-
-
 # ---------------------------------------------------------------- agent pick
 
 def pick_agent(start_az: datetime, now_az: datetime, thread_override: str | None = None) -> dict:
