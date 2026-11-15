@@ -12,6 +12,8 @@ import os
 import re
 from datetime import datetime, timedelta
 
+import rules
+
 log = logging.getLogger("zillow-instant.llm")
 
 # Dated snapshot pin (2026-08-30): the bare alias auto-follows whatever
@@ -83,28 +85,46 @@ Return:
 If the newest message mixes intents (question + time), pick the intent that drives scheduling and still fill question_text."""
 
 
-def _api_call(renter_text: str, transcript: str, now_phx: datetime) -> dict | None:
+def _haiku_json(prompt: str, schema: dict, max_tokens: int,
+                what: str) -> dict | None:
+    """The ONE Haiku call. Returns the model's schema-shaped JSON, or None
+    when there is no API key or anything at all went wrong.
+
+    Both micro-calls (classify and the review gate) carried their own copy of
+    this transport, and the copies had drifted: one logged "falling back to
+    regex" and the other "failing open", and only one of them knew where the
+    Phoenix clock comes from. What a None MEANS stays with the caller - the
+    classifier drops to regex, the review gate fails open - because those are
+    policy, not transport.
+    """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=api_key, timeout=10.0, max_retries=1)
+        client = anthropic.Anthropic(api_key=api_key, timeout=10.0,
+                                     max_retries=1)
         resp = client.messages.create(
             model=MODEL,
-            max_tokens=1536,
-            output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
-            messages=[{"role": "user", "content": PROMPT.format(
-                now=now_phx.strftime("%A, %B %d, %Y at %I:%M %p"),
-                transcript=(transcript or "(no earlier messages)")[:9000],
-                renter_text=(renter_text or "")[:3000],
-            )}],
+            max_tokens=max_tokens,
+            output_config={"format": {"type": "json_schema", "schema": schema}},
+            messages=[{"role": "user", "content": prompt}],
         )
         text = next((b.text for b in resp.content if b.type == "text"), "")
         return json.loads(text)
     except Exception as e:  # noqa: BLE001
-        log.error("Haiku classify failed, falling back to regex: %s", e)
+        log.error("Haiku %s failed: %s", what, e)
         return None
+
+
+def _api_call(renter_text: str, transcript: str, now_phx: datetime) -> dict | None:
+    return _haiku_json(
+        PROMPT.format(
+            now=now_phx.strftime("%A, %B %d, %Y at %I:%M %p"),
+            transcript=(transcript or "(no earlier messages)")[:9000],
+            renter_text=(renter_text or "")[:3000],
+        ),
+        SCHEMA, 1536, "classify (falling back to regex)")
 
 
 # ---------------------------------------------------------------- regex fallback
@@ -231,30 +251,19 @@ def review_reply(transcript: str, outgoing_body: str, template: str,
     """Second look before a renter-facing send. FAILS OPEN: any error means
     {"verdict": "send"} - the deterministic guards still stand, and a review
     outage must never stop the pipeline."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return {"verdict": "send", "reason": "review-unavailable"}
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key, timeout=10.0, max_retries=1)
-        resp = client.messages.create(
-            model=MODEL,
-            max_tokens=256,
-            output_config={"format": {"type": "json_schema",
-                                      "schema": REVIEW_SCHEMA}},
-            messages=[{"role": "user", "content": REVIEW_PROMPT.format(
-                now=(now_phx or datetime.utcnow() - timedelta(hours=7)
-                     ).strftime("%A, %B %d, %Y at %I:%M %p"),
-                transcript=(transcript or "(none)")[:9000],
-                template=template or "unknown",
-                outgoing=(outgoing_body or "")[:4000],
-            )}],
-        )
-        text = next((b.text for b in resp.content if b.type == "text"), "")
-        out = json.loads(text)
-        if out.get("verdict") not in ("send", "block"):
-            return {"verdict": "send", "reason": "review-malformed"}
-        return out
-    except Exception as e:  # noqa: BLE001
-        log.error("review_reply failed (failing open): %s", e)
-        return {"verdict": "send", "reason": "review-error"}
+    out = _haiku_json(
+        REVIEW_PROMPT.format(
+            now=(now_phx or datetime.now(rules.AZ_TZ)
+                 ).strftime("%A, %B %d, %Y at %I:%M %p"),
+            transcript=(transcript or "(none)")[:9000],
+            template=template or "unknown",
+            outgoing=(outgoing_body or "")[:4000],
+        ),
+        REVIEW_SCHEMA, 256, "review (failing open)")
+    if out is None:
+        return {"verdict": "send",
+                "reason": "review-unavailable"
+                if not os.environ.get("ANTHROPIC_API_KEY") else "review-error"}
+    if out.get("verdict") not in ("send", "block"):
+        return {"verdict": "send", "reason": "review-malformed"}
+    return out
