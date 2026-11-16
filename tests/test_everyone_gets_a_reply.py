@@ -12,7 +12,7 @@ Every test drives the real responder; only Gmail, Firestore, the calendar API
 and the LLM are replaced (the harness from test_book_renter_windows)."""
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
