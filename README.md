@@ -64,7 +64,9 @@ The old key (`ck_7SYX8U2k...`) was pasted into a chat transcript, so treat it as
 
 ### Step 4 — Test
 
-Hit the URL in a browser — you should see `zillow-instant-responder ok` (health check).
+Hit the URL in a browser — you should see `zillow-pipeline ok (dry_run=True)`
+(health check). `dry_run` echoes the `DRY_RUN` env var, which defaults to true, so it
+reads `dry_run=False` only once you set `DRY_RUN=false` to let real replies go out.
 Then send a test Zillow-style inquiry (or wait for a real one) and confirm a reply goes
 out in seconds and the thread gets the `zillow/awaiting-renter` label.
 
