@@ -564,7 +564,7 @@ def test_composio_failure_raises_loud(monkeypatch):
     ev = {"id": "ev1", "summary": "x", "description": PROD_SOLO,
           "start": {"dateTime": "2030-01-09T15:15:00-07:00"},
           "end": {"dateTime": "2030-01-09T15:45:00-07:00"}}
-    stub = _CalendarStub(monkeypatch, ev)
+    _CalendarStub(monkeypatch, ev)
     monkeypatch.setattr(cal, "composio_execute",
                         lambda slug, p: {"successful": False,
                                          "error": "400 whatever"})
