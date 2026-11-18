@@ -166,3 +166,49 @@ def test_application_answer_does_not_repeat_the_link():
     assert body.count(facts.APP_LINK) == 1
     assert "Great question" not in body
     assert T.availability_ask("Ann", "X St").count(facts.APP_LINK) == 1
+
+
+# ------------------------------------------- every rule has both its answers
+# facts._RULES is the one list of standing-rule keys. Two places answer them:
+# facts.ANSWER_LINES (inline, in a first reply) and responder._STANDING_REPLIES
+# /_STANDING_HANDLERS (a standalone reply mid-thread). The second used to be an
+# if/elif chain and silently fell two rules behind, so "can you send me an
+# application?" was answered in a first message and escalated to a human on a
+# reply. These two tests fail the moment a new rule is added to only one half.
+
+def _rule_keys():
+    return {key for key, _rx in facts._RULES}
+
+
+def test_every_standing_rule_has_an_inline_answer():
+    assert _rule_keys() <= set(facts.ANSWER_LINES), (
+        "rules with no facts.ANSWER_LINES entry: "
+        f"{sorted(_rule_keys() - set(facts.ANSWER_LINES))}")
+
+
+def test_every_standing_rule_has_a_reply_path_answer():
+    import responder
+
+    answered = set(responder._STANDING_REPLIES) | set(responder._STANDING_HANDLERS)
+    assert _rule_keys() <= answered, (
+        "rules that would escalate to a human on a reply instead of being "
+        f"answered: {sorted(_rule_keys() - answered)}")
+
+
+def test_reply_path_answers_only_real_rules():
+    import responder
+
+    answered = set(responder._STANDING_REPLIES) | set(responder._STANDING_HANDLERS)
+    assert answered <= _rule_keys(), (
+        f"answers for rules facts._RULES no longer defines: "
+        f"{sorted(answered - _rule_keys())}")
+
+
+def test_reply_path_bodies_are_real_emails():
+    import responder
+    import templates as T
+
+    for key, build in sorted(responder._STANDING_REPLIES.items()):
+        body = build("Trever")
+        assert body.startswith("Hi Trever,"), key
+        assert T.SIGNATURE in body, key
