@@ -610,11 +610,18 @@ def _snap_harness(monkeypatch, doc, propose_hhmm):
     monkeypatch.setattr(responder, "review_gate", lambda t, b, k: (True, ""))
     monkeypatch.setattr(responder, "needs_human",
                         lambda *a, **k: calls.setdefault("nh", []).append(a))
-    monkeypatch.setattr(
-        responder, "send_stage",
-        lambda tid, stage, relay, body, add, rm, meta, mid=None:
-            calls["send_stage"].append((stage, meta.get("template"), body))
-            or "sent")
+    def _send_stage(tid, stage, relay, body, add, rm, meta, mid=None,
+                    commit=None, **kw):
+        # Bookings run their calendar write as send_stage's `commit` hook
+        # (2026-11-21): the stub has to honour it, or "did we fold / create /
+        # reply?" stops being observable here.
+        calls["send_stage"].append((stage, meta.get("template"), body))
+        if commit is not None:
+            commit()
+        responder.gm.send_reply(tid, relay, body)
+        return "sent"
+
+    monkeypatch.setattr(responder, "send_stage", _send_stage)
     monkeypatch.setattr(responder.ledger, "reserve_send",
                         lambda t, s, m: "acquired")
     monkeypatch.setattr(responder.ledger, "mark_sent", lambda *a, **k: None)

@@ -137,6 +137,18 @@ def claim_content_hash(thread_id: str, text: str) -> bool:
         return False
 
 
+# Outcome prefixes that mean "we processed this renter text and the reply did
+# NOT reach them", so a re-run is a retry and not a duplicate.
+# "skipped:send-failed" is what send_stage records, and it also covers
+# "skipped:send-failed-event-created" (the email died after the calendar write).
+# The old tuple listed "no-send:send-failed", which no caller ever writes, so
+# the exemption never fired for a plain Composio send failure (review
+# 2026-11-04). Exported so the booking paths' outcomes can be asserted against
+# the real list instead of a copy of it (2026-11-21).
+SEND_FAILED_PREFIXES = ("skipped:send-failed", "skipped:event-failed",
+                        "error:", "no-send:calendar-error")
+
+
 def _thread_send_failed_since(thread_id: str, claimed_at) -> bool:
     """True when this thread has a message whose processing FAILED at or after
     the moment the content hash was claimed - the strand signature.
@@ -146,13 +158,6 @@ def _thread_send_failed_since(thread_id: str, claimed_at) -> bool:
     very message whose failure stranded the hash always looks slightly older
     than the claim. Without the grace the exemption can never fire for the
     primary case (verified live on Mitchell's thread, 2026-08-29)."""
-    # "skipped:send-failed" is what send_stage and the two booked-then-email-
-    # failed paths actually record (responder.py); it also covers
-    # "skipped:send-failed-event-created". The old tuple listed
-    # "no-send:send-failed", which no caller ever writes, so the exemption
-    # never fired for a plain Composio send failure (review 2026-11-04).
-    failed_prefixes = ("skipped:send-failed", "skipped:event-failed", "error:",
-                       "no-send:calendar-error")
     try:
         db = init_db()
         q = db.collection("zillow_messages").where(
@@ -160,7 +165,7 @@ def _thread_send_failed_since(thread_id: str, claimed_at) -> bool:
         for m in q:
             d = m.to_dict() or {}
             outcome = str(d.get("outcome") or "")
-            if not outcome.startswith(failed_prefixes):
+            if not outcome.startswith(SEND_FAILED_PREFIXES):
                 continue
             processed = d.get("processed_at")
             if (claimed_at is None or processed is None
