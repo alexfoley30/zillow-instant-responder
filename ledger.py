@@ -9,7 +9,6 @@ create-once documents in Firestore (project boundless-portal-c94d0):
   zillow_sends/{threadId}__{stageKey}       THE send lock (reserve -> send -> sent)
   zillow_threads/{gmailThreadId}            per-thread state machine
   zillow_shadow/{threadId}__{stageKey}      dry-run mirror of would-be sends
-  property_facts/{addr-slug}                fact sheets synced from property-facts/*.md
   zillow_config/properties                  blocked (leased) address list
 
 Firestore document create() is atomic: it raises AlreadyExists if the doc
@@ -384,19 +383,6 @@ def blocked_addresses() -> list:
     except Exception as e:  # noqa: BLE001
         log.error("blocked_addresses read failed: %s", e)
     return []
-
-
-def get_facts(addr_slug: str) -> str | None:
-    try:
-        snap = init_db().collection("property_facts").document(addr_slug).get()
-        return snap.get("raw_md") if snap.exists else None
-    except Exception as e:  # noqa: BLE001
-        log.error("get_facts(%s) failed: %s", addr_slug, e)
-        return None
-
-
-def get_standing_rules() -> str | None:
-    return get_facts("_standing_rules")
 
 
 # ------------------------------------------- application attribution (2026-09-17)

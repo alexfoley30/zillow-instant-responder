@@ -67,12 +67,6 @@ def same_property(address: str, haystack: str) -> bool:
     return _number_present(number, hay) and core in hay
 
 
-def addr_slug(address: str) -> str:
-    """'1641 E Coronado Rd, Phoenix...' -> '1641-e-coronado-rd' (fact-sheet key)."""
-    street = (address or "").split(",")[0].strip().lower()
-    return re.sub(r"[^a-z0-9]+", "-", street).strip("-")
-
-
 def is_blocked_address(address: str, blocked_list: list) -> bool:
     a = (address or "").lower()
     for blocked in blocked_list or []:
@@ -182,15 +176,6 @@ def away_events(events: list, day_az) -> list:
         if _AWAY_RE.search(text):
             out.append(ev)
     return out
-
-
-def away_block_status(events_that_day: list) -> str:
-    """'blocked' or 'clear'. Alex shows every house himself since 2026-10-25
-    ("make all showings for me moving forward. My team ... aren't renting
-    them out"), so any away event on his calendar blocks the day; there is
-    no team cover any more. Renter never hears why - callers phrase it as
-    'booked up'."""
-    return "blocked" if away_events(events_that_day, None) else "clear"
 
 
 # ---------------------------------------------------------------- agent pick
