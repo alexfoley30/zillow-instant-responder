@@ -19,6 +19,11 @@ RUN IT WITH APPLE PYTHON. This is not a preference:
     facts/gmail_client/llm - they use PEP 604 `X | None` annotations that
     raise TypeError at import on 3.9. The ~30 lines we need from rules.py are
     reimplemented below and must be kept in sync with it.
+    tests/test_shadow_dump_mirror.py is that sync check: it compares the
+    mirrored constants and functions against rules.py directly, so drift fails
+    the suite. Two bugs got in before it existed (a substring street-number
+    match, and a missing midnight guard in in_window) - keep the test green
+    rather than trusting a read of the two copies.
   * Credentials come from the service-account JSON, never ADC (ADC here is
     stale, has no quota_project_id, and hangs ~300s before failing).
 """
@@ -103,19 +108,32 @@ def number_and_core(address):
     return tokens[0], " ".join(core)
 
 
+def _number_present(number, haystack):
+    """Whole-token street-number match: '1641' must not match inside '16413'.
+    Mirrors rules._number_present. The substring test this replaced reported
+    the wrong house as blocked - the exact regression rules.py's own comment
+    records, which this copy never picked up (tests/test_shadow_dump_mirror)."""
+    return re.search(r"\b%s\b" % re.escape(number), haystack) is not None
+
+
 def addr_matches(blocked, address):
     """Fuzzy match, same semantics as rules.is_blocked_address."""
     number, core = number_and_core(blocked)
     if not number or not core:
         return False
     a = (address or "").lower()
-    return number in a and core in a
+    return _number_present(number, a) and core in a
 
 
 def in_window(start):
+    """Mirrors rules.in_window, midnight guard included: a 30-minute slot that
+    crosses midnight wrapped .time() to 00:00 and passed the close check, so
+    11:30 PM read as in-window (round-2 shadow, Lyndsey)."""
     lo, hi = SHOWING_WINDOWS[start.weekday()]
-    end = (start + timedelta(minutes=SHOWING_MINUTES)).time()
-    return lo <= start.time() and end <= hi
+    end_dt = start + timedelta(minutes=SHOWING_MINUTES)
+    if end_dt.date() != start.date():
+        return False
+    return lo <= start.time() and end_dt.time() <= hi
 
 
 # ---- read-only guard ----------------------------------------------------
