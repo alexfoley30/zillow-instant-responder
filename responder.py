@@ -765,10 +765,24 @@ def _handle_reply(thread_id, doc, msgs, renter_text, message_id, ctx) -> str:
                                               message_id, now_az)
             return book_accepted_offer(thread_id, doc, first_name, address,
                                        relay, message_id)
+        # U83: no offer WE armed - but Alex may have typed one himself, and a
+        # yes on a booked thread is usually "see you then".
+        if _confirms_booking(doc, cls, renter_text, now_az, msgs, message_id):
+            return _quiet_confirmation(thread_id)
+        hand = _hand_offer_slot(msgs, message_id, now_az)
+        if hand:
+            return _book_hand_offer(thread_id, doc, first_name, address, relay,
+                                    cls, hand, message_id, now_az)
         needs_human(thread_id, first_name, address,
                     f"sounded like a yes but no live offer stands: {renter_text[:60]}",
                     urgent=True)
         return "no-send:accept-no-live-offer"
+
+    # U83: "I will be there at 6pm today" on a thread already booked for 6pm
+    # today names the booked time; it is a confirmation, not a new booking.
+    if intent == "propose_time" and _confirms_booking(
+            doc, cls, renter_text, now_az, msgs, message_id, need_time=True):
+        return _quiet_confirmation(thread_id)
 
     # A day with a window ("Wednesday between 2 and 5", "Friday after 2") is a
     # time the renter can make: book the earliest valid slot in it instead of
@@ -841,6 +855,164 @@ def _handle_reply(thread_id, doc, msgs, renter_text, message_id, ctx) -> str:
     # other / unparseable: fail safe, never guess.
     needs_human(thread_id, first_name, address, renter_text[:120])
     return "no-send:needs-human"
+
+
+# ------------------------------------------------- U83: Alex's own offers
+
+def _alex_before_reply(msgs, message_id):
+    """The message from Alex the renter is answering: his last one before the
+    trigger, with nothing from the renter in between. Returns (text, sent_at)
+    or (None, None)."""
+    msgs = list(msgs or [])
+    idx = next((i for i, m in enumerate(msgs) if gm.msg_id(m) == message_id),
+               None)
+    if idx is None:  # a /reprocess id: the newest renter message is the trigger
+        idx = max((i for i, m in enumerate(msgs) if gm.is_from_relay(m)),
+                  default=None)
+    if idx is None:
+        return None, None
+    for m in reversed(msgs[:idx]):
+        if gm.is_from_relay(m):
+            return None, None    # the renter spoke after Alex's last message
+        if gm.is_from_alex(m):
+            return gm.msg_body(m), gm.msg_time(m)
+    return None, None
+
+
+def _hand_offer_slot(msgs, message_id, now_az):
+    """The day + time Alex typed to this renter himself in the message they
+    are answering. None when there is no such message, it has no single clear
+    day and time (rules.hand_offer_slot), or the time has passed.
+
+    U83, 2026-11-20 (2701 E Willetta): Jace got sick, Alex offered Jose and
+    Emilsa "tomorrow at 10" by hand, both said yes, and both were held as
+    "no live offer stands" because only offers the service sent were armed."""
+    text, sent_at = _alex_before_reply(msgs, message_id)
+    slot = rules.hand_offer_slot(text, sent_at) if text else None
+    return slot if slot and slot > now_az else None
+
+
+def _confirms_booking(doc, cls, renter_text, now_az, msgs, message_id,
+                      need_time=False) -> bool:
+    """A yes on a thread already BOOKED, for the booked slot: "yes, will be
+    there" to a reminder (Ki 11/18, twice) or "I will be there at 6pm today"
+    (Jose 11/20, booked 6pm). Any time or date the renter names must be the
+    booked one. A yes that names no time counts only when the message it
+    answers carries the booked time (our confirmation or a reminder): a yes
+    to anything else Alex wrote, a vague reschedule included, is not ours to
+    read. need_time: the renter must name the booked time."""
+    doc = doc or {}
+    if doc.get("state") != ledger.BOOKED:
+        return False
+    try:
+        booked = datetime.fromisoformat(doc.get("booked_start_iso") or "")
+    except (ValueError, TypeError):
+        return False
+    if booked < now_az - timedelta(hours=1):
+        return False             # an old showing: not what they're saying yes to
+    answered, _ = _alex_before_reply(msgs, message_id)
+    hand = _hand_offer_slot(msgs, message_id, now_az)
+    if hand is not None and hand != booked:
+        return False             # that yes is to Alex's new time
+    named = False
+    for c in (cls or {}).get("time_candidates") or []:
+        if c.get("date") and c["date"] != booked.date().isoformat():
+            return False
+        if _hhmm(c.get("time")):
+            named = True
+            if c["time"].zfill(5) != booked.strftime("%H:%M"):
+                return False
+    for m in _CLOCK_IN_TEXT.finditer(renter_text or ""):
+        named = True
+        hm = ((int(m.group(1)) % 12, int(m.group(2))) if m.group(1) is not None
+              else (int(m.group(4)) % 12, 0))
+        if hm != (booked.hour % 12, booked.minute):
+            return False
+    if named:
+        return True
+    return not need_time and booked.strftime("%-I:%M %p") in (answered or "")
+
+
+def _quiet_confirmation(thread_id) -> str:
+    """The renter confirmed their booked tour: nothing to book, nothing to
+    send, nobody to Poke. Same labels as a courtesy closer."""
+    log.info("booked-tour confirmation %s: no send, no ping", thread_id)
+    try:
+        if not dry_run():
+            gm.modify_labels(thread_id, [HANDLED_LABEL], [AWAITING_LABEL])
+    except Exception as e:  # noqa: BLE001
+        log.error("confirmation relabel failed: %s", e)
+    return "no-send:booked-confirmation"
+
+
+def _book_hand_offer(thread_id, doc, first_name, address, relay, cls, slot,
+                     message_id, now_az) -> str:
+    """The renter said yes to a time Alex typed by hand: book exactly that
+    time through the normal guards (validate_slot with the renter's declined
+    times, the newest-message check and review_gate inside the book paths).
+    Never counters or swaps in another time - Alex picked it, so anything that
+    won't book goes back to him like before. A reschedule takes the renter
+    off their old showing (fold-aware) once the new one is confirmed."""
+    when = cal.fmt_showing_time(slot)
+    try:
+        events = cal.list_events(10)
+    except Exception as e:  # noqa: BLE001
+        needs_human(thread_id, first_name, address,
+                    f"said yes to your {when} but the calendar is unavailable: "
+                    f"{str(e)[:60]}", urgent=True)
+        return "no-send:calendar-error"
+    old_event = (doc or {}).get("event_id") or ""
+    try:
+        same = [s for s in cal.find_existing_showings(
+                    address, events=events, min_lead_hours=0, limit=10)
+                if s["start_az"] == slot]
+    except Exception as e:  # noqa: BLE001
+        log.error("hand-offer showing lookup failed %s: %s", thread_id, e)
+        same = []
+    new_event = None
+    if same:
+        new_event = same[0]["event"].get("id", "")
+        if new_event and new_event == old_event:
+            return _quiet_confirmation(thread_id)
+        if slot < now_az + timedelta(hours=2):
+            # book_accepted_offer looks events up 2h out; closer than that it
+            # could fold them into the wrong showing.
+            needs_human(thread_id, first_name, address,
+                        f"said yes to your {when} (joins a showing already "
+                        "there) - add them by hand", urgent=True)
+            return "no-send:hand-offer-too-close"
+        result = book_accepted_offer(
+            thread_id, dict(doc or {}, offered_event_id=new_event), first_name,
+            address, relay, message_id)
+    else:
+        rf = _renter_facts(doc, cls)
+        v = cal.validate_slot(slot, address, events, now_az=now_az,
+                              ignore_same_house=True,
+                              declined_iso=rf["declined_iso"],
+                              earliest_daily=rf["earliest_daily"],
+                              latest_daily=rf["latest_daily"],
+                              enforce_daily_bounds=False, we_offered=True)
+        if not v.get("ok"):
+            needs_human(thread_id, first_name, address,
+                        f"said yes to your {when} but it won't book "
+                        f"({v.get('reason')}) - book it by hand", urgent=True)
+            return "no-send:hand-offer-invalid"
+        # snap_offered: Alex chose this exact time; never swap in a nearby one.
+        result = _book_valid_slot(thread_id, dict(doc or {}, snap_offered=True),
+                                  first_name, address, relay, slot, v, events,
+                                  message_id, f"reply__{message_id}")
+    if result == "sent" and old_event and old_event != new_event:
+        try:
+            outcome = cal.remove_renter_or_cancel(
+                old_event, (doc or {}).get("renter_name") or first_name)
+        except Exception as e:  # noqa: BLE001
+            log.error("old showing cleanup failed %s: %s", thread_id, e)
+            outcome = "kept-unparsed"
+        if outcome == "kept-unparsed":
+            needs_human(thread_id, first_name, address,
+                        f"moved to {when}; take them off their old showing by "
+                        "hand")
+    return result
 
 
 def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) -> str:

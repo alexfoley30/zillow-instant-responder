@@ -328,3 +328,104 @@ def named_tour_dates(cls: dict, text: str, now_az: datetime) -> list:
         elif now_az.hour < 5 and dates[0] > now_az.date():
             dates.insert(0, dates[0] - _td(days=1))
     return sorted(dates)[:2]
+
+
+# ---------------------------------------------------- Alex's hand-typed offer
+
+# Where Alex's own words end in a sent email: quoted history, a phone footer,
+# or his signature block (which carries a phone number and "Suite 120").
+_HAND_CUT_RE = re.compile(
+    r"\bOn\s+(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,?\s.*?wrote:"
+    r"|^\s*>|^\s*-{2,}\s*original message|^\s*from:\s|sent from my"
+    r"|^\s*alex foley\b|realtor\s*&\s*property manager",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL)
+_HAND_MERIDIEM = r"(a\.?m\.?|p\.?m\.?)"
+_HAND_TIME_RE = re.compile(
+    rf"\b(\d{{1,2}}):(\d{{2}})\s*{_HAND_MERIDIEM}?(?![\w/])"
+    rf"|\b(\d{{1,2}})\s*{_HAND_MERIDIEM}(?!\w)"
+    r"|(?:\bat|@)\s*(\d{1,2})\b(?![:/\d]|\.\d)"
+    r"|\b(noon)\b", re.IGNORECASE)
+_HAND_DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})(?:/\d{2,4})?\b")
+_HAND_STRAY_NUM_RE = re.compile(r"(?<![\w/:$])(\d{1,2})(?![\w/:%])")
+
+
+def hand_offer_slot(text: str, said_at: datetime):
+    """The ONE concrete day and time Alex offered a renter in an email he
+    typed himself, as an AZ datetime, or None when there is no single clear
+    offer (U83, 2026-11-20: Jace got sick and Alex wrote Jose and Emilsa
+    "tomorrow at 10" for 2701 E Willetta; both said yes and both were held as
+    "no live offer stands" because the responder only knew offers it had sent).
+
+    said_at is when Alex sent it, so his "tomorrow" means the right day. Fails
+    toward None (the caller Pokes, as before): no day, no time, two days, two
+    times, a stray number that could be a second time ("10 or 11"), or a bare
+    7, 8 or 9 with no am/pm."""
+    if not text or said_at is None:
+        return None
+    said_at = said_at.astimezone(AZ_TZ)
+    cut = _HAND_CUT_RE.search(text)
+    t = (text[:cut.start()] if cut else text).lower()
+
+    times = set()
+    for m in _HAND_TIME_RE.finditer(t):
+        if m.group(7):
+            times.add((12, 0))
+            continue
+        if m.group(1) is not None:
+            h, mi, mer = int(m.group(1)), int(m.group(2)), m.group(3)
+        elif m.group(4) is not None:
+            h, mi, mer = int(m.group(4)), 0, m.group(5)
+        else:
+            h, mi, mer = int(m.group(6)), 0, None
+        if h > 12 and mer is None and h < 24:
+            times.add((h, mi))
+            continue
+        if not 1 <= h <= 12 or mi > 59:
+            return None
+        if mer:
+            pm = mer.startswith("p")
+        elif h in (10, 11):
+            pm = False
+        elif h == 12 or 1 <= h <= 6:
+            pm = True
+        else:
+            return None            # a bare 7, 8 or 9: morning or evening?
+        times.add(((h % 12) + (12 if pm else 0), mi))
+    if len(times) != 1:
+        return None
+
+    # The day is read from the sentence that holds the time ("Jace got sick
+    # today. Could you do tomorrow at 10?" means tomorrow); the whole message
+    # only when that sentence names no day.
+    sentences = [x for x in re.split(r"(?<=[.!?])\s+|\n+", t) if x.strip()]
+    near = " ".join(x for x in sentences if _HAND_TIME_RE.search(x))
+    days = _hand_days(near, said_at)
+    if days is not None and not days:
+        days = _hand_days(t, said_at)
+    if days is None or len(days) != 1:
+        return None
+
+    stripped = _HAND_DATE_RE.sub(" ", _HAND_TIME_RE.sub(" ", t))
+    if _HAND_STRAY_NUM_RE.search(stripped):
+        return None                # "10 or 11", "at 10, or 2": not one offer
+    (h, mi), d = times.pop(), days.pop()
+    return datetime(d.year, d.month, d.day, h, mi, tzinfo=AZ_TZ)
+
+
+def _hand_days(t: str, said_at: datetime):
+    """Distinct dates a piece of Alex's message names; None on a bad date."""
+    days = set()
+    if re.search(r"\b(?:today|tonight|this (?:morning|afternoon|evening))\b", t):
+        days.add(said_at.date())
+    if re.search(r"\b(?:tomorrow|tmrw|tmr)\b", t):
+        days.add(said_at.date() + timedelta(days=1))
+    for name, wd in _WEEKDAYS.items():
+        if re.search(rf"\b{name}\b", t):
+            days.add(said_at.date() + timedelta(days=(wd - said_at.weekday()) % 7))
+    for m in _HAND_DATE_RE.finditer(t):
+        try:
+            days.add(said_at.date().replace(month=int(m.group(1)),
+                                            day=int(m.group(2))))
+        except ValueError:
+            return None
+    return days
