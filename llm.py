@@ -10,9 +10,14 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger("zillow-instant.llm")
+
+# Arizona observes no DST, so the offset is fixed. Spelled out here rather
+# than re-deriving it as `utcnow() - timedelta(hours=7)` at the call site
+# (which also used the deprecated naive utcnow()).
+PHX = timezone(timedelta(hours=-7))
 
 # Dated snapshot pin (2026-08-30): the bare alias auto-follows whatever
 # Anthropic promotes next, and this pipeline's pins are load-bearing (see the
@@ -83,7 +88,14 @@ Return:
 If the newest message mixes intents (question + time), pick the intent that drives scheduling and still fill question_text."""
 
 
-def _api_call(renter_text: str, transcript: str, now_phx: datetime) -> dict | None:
+def _json_call(what: str, prompt: str, schema: dict, max_tokens: int):
+    """The ONE Haiku call. Returns the parsed JSON object, or None when the
+    key is missing, the call failed, or the output would not parse - every
+    caller owns its own fallback (regex classify / fail-open review).
+
+    Both callers used to carry their own copy of this and the copies had
+    drifted: different key checks, different error shapes, and the review
+    side hand-rolled Phoenix time as `utcnow() - 7h`."""
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None
@@ -92,18 +104,14 @@ def _api_call(renter_text: str, transcript: str, now_phx: datetime) -> dict | No
         client = anthropic.Anthropic(api_key=api_key, timeout=10.0, max_retries=1)
         resp = client.messages.create(
             model=MODEL,
-            max_tokens=1536,
-            output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
-            messages=[{"role": "user", "content": PROMPT.format(
-                now=now_phx.strftime("%A, %B %d, %Y at %I:%M %p"),
-                transcript=(transcript or "(no earlier messages)")[:9000],
-                renter_text=(renter_text or "")[:3000],
-            )}],
+            max_tokens=max_tokens,
+            output_config={"format": {"type": "json_schema", "schema": schema}},
+            messages=[{"role": "user", "content": prompt}],
         )
         text = next((b.text for b in resp.content if b.type == "text"), "")
         return json.loads(text)
     except Exception as e:  # noqa: BLE001
-        log.error("Haiku classify failed, falling back to regex: %s", e)
+        log.error("Haiku %s failed, falling back: %s", what, e)
         return None
 
 
@@ -174,7 +182,11 @@ def classify_reply(renter_text: str, last_alex: str, now_phx: datetime,
     if transcript is None:
         transcript = (f"US: {last_alex or '(none)'}\n"
                       f"RENTER: {renter_text or ''}")
-    result = _api_call(renter_text, transcript, now_phx)
+    result = _json_call("classify", PROMPT.format(
+        now=now_phx.strftime("%A, %B %d, %Y at %I:%M %p"),
+        transcript=(transcript or "(no earlier messages)")[:9000],
+        renter_text=(renter_text or "")[:3000],
+    ), SCHEMA, 1536)
     if result is None:
         result = _regex_classify(renter_text, now_phx)
     result.setdefault("time_candidates", [])
@@ -228,33 +240,17 @@ Reply about to be sent (template: {template}):
 
 def review_reply(transcript: str, outgoing_body: str, template: str,
                  now_phx: datetime = None) -> dict:
-    """Second look before a renter-facing send. FAILS OPEN: any error means
-    {"verdict": "send"} - the deterministic guards still stand, and a review
-    outage must never stop the pipeline."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
+    """Second look before a renter-facing send. FAILS OPEN: no key, any error
+    or unusable output all mean {"verdict": "send"} - the deterministic guards
+    still stand, and a review outage must never stop the pipeline."""
+    out = _json_call("review", REVIEW_PROMPT.format(
+        now=(now_phx or datetime.now(PHX)).strftime("%A, %B %d, %Y at %I:%M %p"),
+        transcript=(transcript or "(none)")[:9000],
+        template=template or "unknown",
+        outgoing=(outgoing_body or "")[:4000],
+    ), REVIEW_SCHEMA, 256)
+    if out is None:
         return {"verdict": "send", "reason": "review-unavailable"}
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key, timeout=10.0, max_retries=1)
-        resp = client.messages.create(
-            model=MODEL,
-            max_tokens=256,
-            output_config={"format": {"type": "json_schema",
-                                      "schema": REVIEW_SCHEMA}},
-            messages=[{"role": "user", "content": REVIEW_PROMPT.format(
-                now=(now_phx or datetime.utcnow() - timedelta(hours=7)
-                     ).strftime("%A, %B %d, %Y at %I:%M %p"),
-                transcript=(transcript or "(none)")[:9000],
-                template=template or "unknown",
-                outgoing=(outgoing_body or "")[:4000],
-            )}],
-        )
-        text = next((b.text for b in resp.content if b.type == "text"), "")
-        out = json.loads(text)
-        if out.get("verdict") not in ("send", "block"):
-            return {"verdict": "send", "reason": "review-malformed"}
-        return out
-    except Exception as e:  # noqa: BLE001
-        log.error("review_reply failed (failing open): %s", e)
-        return {"verdict": "send", "reason": "review-error"}
+    if out.get("verdict") not in ("send", "block"):
+        return {"verdict": "send", "reason": "review-malformed"}
+    return out
