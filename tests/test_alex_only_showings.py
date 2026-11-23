@@ -68,10 +68,12 @@ def test_same_house_overlap_is_not_a_conflict():
 
 
 def test_any_away_event_blocks_the_day():
+    # The two rules.away_block_status() assertions were dropped 2026-11-23:
+    # nothing in production calls that helper any more (calendar_logic decides
+    # "away-blocked" on its own from away_events), so they pinned an orphan
+    # instead of the shipped path. validate_slot below IS the shipped path.
     away = {"summary": "Out of town", "start": {"date": "2026-10-27"},
             "end": {"date": "2026-10-28"}}
-    assert rules.away_block_status([away]) == "blocked"
-    assert rules.away_block_status([]) == "clear"
     start = datetime(2026, 10, 27, 11, 0, tzinfo=AZ)
     assert cal.validate_slot(start, ADDR, [away], now_az=NOW)["reason"] == "away-blocked"
 
