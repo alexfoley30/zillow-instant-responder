@@ -1,7 +1,8 @@
 # Zillow Instant Responder
 
-Sub-30-second auto-reply to new Zillow rental inquiries. This is the "instant layer."
-The existing 5-minute sweep stays as the "smart layer" for booking/calendar.
+Sub-30-second auto-reply to new Zillow rental inquiries. Booking, calendar and the
+maintenance loops now run in this service too (`calendar_logic.py`, `cron.py`); the
+external sweep is only a coarse backstop.
 
 ## How it works
 
@@ -14,13 +15,26 @@ New Zillow email lands in alex@azfoleyhomes.com
 Renter has a reply in a few seconds, 24/7, independent of Alex's Mac.
 ```
 
-No AI in the hot path = no token cost, no Anthropic key, dirt cheap to run.
-`responder.py` is pure Python standard library — no pip install, no build step.
+The first availability-ask is template-driven, so the common path costs no tokens.
+An LLM is used for the narrower jobs — reply classification and the pre-send review
+in `llm.py` — so `ANTHROPIC_API_KEY` is required and `pip install -r requirements.txt`
+is a real build step. The pins in `requirements.txt` are load-bearing; read the
+comments there before bumping one.
 
 ## What's already done (by Claude)
 
-- `responder.py` — the full webhook receiver + reply logic (idempotent, secret-verified)
+- `responder.py` — webhook receiver + routing (idempotent, secret-verified)
+- `gmail_client.py` — Gmail/Composio calls, including `extract_event()` payload parsing
+- `templates.py` — the reply templates; `rules.py` — roster and scheduling constants
+- `calendar_logic.py` — slot validation and agent assignment
+- `ledger.py` — Firestore `zillow_threads` state and the send lock
+- `llm.py` — reply classification and the pre-send review
+- `cron.py` — in-process 20-minute ticker: label retries, stuck-send recovery,
+  48h nudge, 7-day close, showing reminders
+- `website_lead.py` — the Netlify form intake at `/hooks/website-lead/<token>`
 - `render.yaml` — one-file deploy config for Render
+- `scripts/` — `application.py` (lease/application logging), `sync_facts.py`,
+  `shadow_dump.py`
 - This runbook
 
 ## What only YOU can do (firm reasons)
@@ -64,18 +78,29 @@ The old key (`ck_7SYX8U2k...`) was pasted into a chat transcript, so treat it as
 
 ### Step 4 — Test
 
-Hit the URL in a browser — you should see `zillow-instant-responder ok` (health check).
-Then send a test Zillow-style inquiry (or wait for a real one) and confirm a reply goes
+Hit the URL in a browser — you should see `zillow-pipeline ok (dry_run=True)` or
+`(dry_run=False)` (health check, `GET /`).
+
+`DRY_RUN` defaults to **true**, so a fresh deploy parses and logs but sends nothing.
+Set `DRY_RUN=false` in the Environment tab once the health check looks right. Then
+send a test Zillow-style inquiry (or wait for a real one) and confirm a reply goes
 out in seconds and the thread gets the `zillow/awaiting-renter` label.
+
+Other POST routes on the service, for reference:
+
+- `/` — the Composio trigger webhook (guarded by `WEBHOOK_SECRET`)
+- `/reprocess` and `/send-approved` — operator endpoints, guarded by
+  `REPROCESS_SECRET` rather than `WEBHOOK_SECRET`
+- `/hooks/website-lead/<token>` — Netlify form intake; the token is in the URL
 
 ## Notes / honesty
 
 - The exact Composio v3 execute endpoint path and trigger payload shape can drift with
-  their API version. `responder.py` is defensive about payload shape, but if the first
+  their API version. The parsing is defensive about payload shape, but if the first
   real trigger logs a parse miss, send Claude the logged payload and it'll adjust
-  `extract_event()` in one edit.
-- Once this is live and confirmed, the 5-minute sweep can be slowed to ~10-15 min (it's
-  now just a backstop for booking replies), cutting cost further. Tell Claude when ready.
+  `extract_event()` in `gmail_client.py` in one edit.
+- Booking replies and the nudge/reminder loops are handled in-process by `cron.py`
+  on a 20-minute tick, so the external sweep is already just a backstop.
 - If you ever want to avoid the monthly host cost, the alternative is running this on an
   always-on office machine behind a Cloudflare Tunnel — more setup, Mac/office-dependent,
   but $0/mo. Ask Claude if you want that path instead.
