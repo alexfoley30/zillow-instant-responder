@@ -1,9 +1,10 @@
 """Question routing: deterministic standing-rule router FIRST, fact sheets second.
 
 v1 policy (approved plan): standing rules answer the bulk of real traffic with
-canned templates; genuine property-specific questions go to NEEDS_HUMAN with
-the "checking with the owner" reply + a needs-you Poke. LLM-composed fact
-answers are a v1.1 upgrade, only if NEEDS_HUMAN volume annoys Alex.
+canned templates; genuine property-specific questions go to NEEDS_HUMAN with a
+needs-you Poke and NO renter-facing ack (the old "checking with the owner"
+reply was retired - see responder.route_question). LLM-composed fact answers
+are a v1.1 upgrade, only if NEEDS_HUMAN volume annoys Alex.
 """
 
 import re
