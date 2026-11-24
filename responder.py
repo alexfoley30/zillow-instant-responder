@@ -206,6 +206,39 @@ def _escalate_review_block(thread_id: str, reason: str, template: str):
                 urgent=True)
 
 
+def claim_send(thread_id: str, stage_key: str, meta: dict,
+               trigger_message_id: str = "") -> str | None:
+    """Win the send lock for (thread, stage), or say why we must not send.
+
+    Returns None when we own the lock and the caller may proceed, otherwise
+    the "skipped:<why>" string the caller should return unchanged.
+
+    This reserve -> Gmail-check -> takeover sequence is THE idempotency
+    primitive (see the module docstring). It was open-coded in four places -
+    send_stage, book_accepted_offer, and both booking paths in
+    _book_valid_slot - and the four copies had drifted: only send_stage
+    logged the skip, and it alone recorded recovered="backfilled-from-gmail"
+    / returned "skipped:recovered-already-sent" where the booking paths said
+    "backfilled" / "skipped:recovered". No caller or test reads those two
+    strings (callers check "sent"/"shadowed" or a "no-send:" prefix), so the
+    merged version keeps the more descriptive audit tag and logs every skip.
+    """
+    verdict = ledger.reserve_send(thread_id, stage_key, meta)
+    if verdict in ("already-sent", "in-flight"):
+        log.info("send lock skip (%s): %s %s", verdict, thread_id, stage_key)
+        return f"skipped:{verdict}"
+    if verdict == "recover":
+        # Ambiguity resolves against the source of truth: the thread itself.
+        msgs = gm.fetch_thread(thread_id)
+        if gm.alex_replied_after(msgs, trigger_message_id):
+            ledger.mark_sent(thread_id, stage_key,
+                             recovered="backfilled-from-gmail")
+            return "skipped:recovered"
+        if not ledger.takeover_send(thread_id, stage_key):
+            return "skipped:takeover-lost"
+    return None
+
+
 def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
                labels_add: list, labels_remove: list, meta: dict,
                trigger_message_id: str = "") -> str:
@@ -232,18 +265,9 @@ def send_stage(thread_id: str, stage_key: str, relay: str, body: str,
         log.info("SHADOW %s %s", thread_id, stage_key)
         return "shadowed"
 
-    verdict = ledger.reserve_send(thread_id, stage_key, meta)
-    if verdict in ("already-sent", "in-flight"):
-        log.info("send_stage skip (%s): %s %s", verdict, thread_id, stage_key)
-        return f"skipped:{verdict}"
-    if verdict == "recover":
-        # Ambiguity resolves against the source of truth: the thread itself.
-        msgs = gm.fetch_thread(thread_id)
-        if gm.alex_replied_after(msgs, trigger_message_id):
-            ledger.mark_sent(thread_id, stage_key, recovered="backfilled-from-gmail")
-            return "skipped:recovered-already-sent"
-        if not ledger.takeover_send(thread_id, stage_key):
-            return "skipped:takeover-lost"
+    skip = claim_send(thread_id, stage_key, meta, trigger_message_id)
+    if skip:
+        return skip
 
     ok, why = review_gate(thread_id, body, meta.get("template", stage_key))
     if not ok:
@@ -290,7 +314,7 @@ def needs_human(thread_id: str, first_name: str, address: str, last_line: str,
     # Plain English, and a NUDGE first line so Poke relays it word for word
     # (Victor 2026-10-27: Poke rewrote "outgoing windows_ask blocked" into
     # "Victor wants to come by ... for the windows", which read like a repair).
-    msg = (f'{tag}Zillow renter {first_name}, {address.split(",")[0]}: '
+    msg = (f'{tag}Zillow renter {first_name}, {rules.street_line(address)}: '
            f'"{(last_line or "")[:160]}". Reply with your answer and I will '
            f'send it to the renter. [zt:{thread_id}]')
     if dry_run():
@@ -309,7 +333,7 @@ def needs_human(thread_id: str, first_name: str, address: str, last_line: str,
             log.error("poke ping failed: %s", e)
         try:
             delivered = bool(gm.alert_email(
-                f"{tag}{first_name} - {address.split(',')[0]}",
+                f"{tag}{first_name} - {rules.street_line(address)}",
                 msg + "\n\nSent by the Zillow pipeline (email backup channel; "
                       "Poke delivery is unreliable). Reply to the renter via "
                       "the thread in Gmail, or answer this Needs-you in "
@@ -886,16 +910,10 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
         })
         return "shadowed"
 
-    verdict = ledger.reserve_send(thread_id, stage, {"template": "booking_fold"})
-    if verdict in ("already-sent", "in-flight"):
-        return f"skipped:{verdict}"
-    if verdict == "recover":
-        msgs = gm.fetch_thread(thread_id)
-        if gm.alex_replied_after(msgs, message_id):
-            ledger.mark_sent(thread_id, stage, recovered="backfilled")
-            return "skipped:recovered"
-        if not ledger.takeover_send(thread_id, stage):
-            return "skipped:takeover-lost"
+    skip = claim_send(thread_id, stage, {"template": "booking_fold"},
+                      message_id)
+    if skip:
+        return skip
 
     body = T.booking_confirmation(first_name, address,
                                   existing["when_human"], agent_name)
@@ -921,7 +939,7 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
                       agent=agent_name)
     try:
         gm.poke_ping(f"Booked (added to existing showing): {first_name} - "
-                     f"{address.split(',')[0]} - {existing['when_human']}. [FYI]")
+                     f"{rules.street_line(address)} - {existing['when_human']}. [FYI]")
     except Exception as e:  # noqa: BLE001
         log.error("fold FYI ping failed: %s", e)
     return "sent"
@@ -1472,18 +1490,11 @@ def _book_valid_slot(thread_id, doc, first_name, address, relay, start_az, v,
             diff_s = abs((near["start_az"] - start_az).total_seconds())
             stage_probe = stage
             if diff_s <= 300:
-                verdict = ledger.reserve_send(
-                    thread_id, stage_probe, {"template": "booking_fold_snap"})
-                if verdict in ("already-sent", "in-flight"):
-                    return f"skipped:{verdict}"
-                if verdict == "recover":
-                    msgs2 = gm.fetch_thread(thread_id)
-                    if gm.alex_replied_after(msgs2, message_id):
-                        ledger.mark_sent(thread_id, stage_probe,
-                                         recovered="backfilled")
-                        return "skipped:recovered"
-                    if not ledger.takeover_send(thread_id, stage_probe):
-                        return "skipped:takeover-lost"
+                skip = claim_send(thread_id, stage_probe,
+                                  {"template": "booking_fold_snap"},
+                                  message_id)
+                if skip:
+                    return skip
                 agent_name = cal.agent_name_from_event(near["event"])
                 body = _with_lead(T.booking_confirmation(
                     first_name, address, near["when_human"], agent_name), lead)
@@ -1518,7 +1529,7 @@ def _book_valid_slot(thread_id, doc, first_name, address, relay, start_az, v,
                 try:
                     gm.poke_ping(
                         f"Booked (joined existing): {first_name} - "
-                        f"{address.split(',')[0]} - {near['when_human']}. [FYI]")
+                        f"{rules.street_line(address)} - {near['when_human']}. [FYI]")
                 except Exception as e:  # noqa: BLE001
                     log.error("snap fold FYI ping failed: %s", e)
                 return "sent"
@@ -1543,7 +1554,7 @@ def _book_valid_slot(thread_id, doc, first_name, address, relay, start_az, v,
     jace_ping = None
     if same_day or jace_cover:
         reason = ("Alex busy" if jace_cover else "same-day")
-        jace_ping = (f"{agent['name'].split()[0]} assigned: {first_name} at {address.split(',')[0]} "
+        jace_ping = (f"{agent['name'].split()[0]} assigned: {first_name} at {rules.street_line(address)} "
                      f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - {reason}. "
                      "Conflict? Reply fast.")
 
@@ -1559,17 +1570,10 @@ def _book_valid_slot(thread_id, doc, first_name, address, relay, start_az, v,
         return "shadowed"
 
     stage_probe = stage
-    verdict = ledger.reserve_send(thread_id, stage_probe,
-                                  {"template": "booking_new"})
-    if verdict in ("already-sent", "in-flight"):
-        return f"skipped:{verdict}"
-    if verdict == "recover":
-        msgs = gm.fetch_thread(thread_id)
-        if gm.alex_replied_after(msgs, message_id):
-            ledger.mark_sent(thread_id, stage_probe, recovered="backfilled")
-            return "skipped:recovered"
-        if not ledger.takeover_send(thread_id, stage_probe):
-            return "skipped:takeover-lost"
+    skip = claim_send(thread_id, stage_probe, {"template": "booking_new"},
+                      message_id)
+    if skip:
+        return skip
 
     body = _with_lead(T.booking_confirmation(first_name, address, when_human,
                                              agent["name"]), lead)
@@ -1603,7 +1607,7 @@ def _book_valid_slot(thread_id, doc, first_name, address, relay, start_az, v,
     # phone). Cover bookings keep the urgent reply-fast copy.
     try:
         gm.poke_ping(jace_ping or (
-            f"Booked: {first_name} - {address.split(',')[0]} - "
+            f"Booked: {first_name} - {rules.street_line(address)} - "
             f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} with "
             f"{agent['name'].split()[0]}. [FYI]"))
     except Exception as e:  # noqa: BLE001

@@ -99,6 +99,18 @@ def test_addr_slug():
     assert rules.addr_slug("1641 E Coronado Rd, Phoenix, AZ 85006") == "1641-e-coronado-rd"
 
 
+def test_street_line():
+    # The one street-head helper the pings, calendar summaries and address
+    # keys all share (replaced ten open-coded `address.split(",")[0]` sites).
+    assert rules.street_line("1641 E Coronado Rd, Phoenix, AZ 85006") == "1641 E Coronado Rd"
+    assert rules.street_line("1641 E Coronado Rd") == "1641 E Coronado Rd"
+    # Surrounding whitespace is trimmed; interior spacing is left alone.
+    assert rules.street_line("  1641 E Coronado Rd , Phoenix") == "1641 E Coronado Rd"
+    # A missing address must not raise - the bare .split() version did.
+    assert rules.street_line(None) == ""
+    assert rules.street_line("") == ""
+
+
 # --------------------------------------- weekday snap (8/22 Adam Friday bug)
 
 def _snap(raw, llm_date, now):

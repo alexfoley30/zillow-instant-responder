@@ -28,6 +28,9 @@ from firebase_admin import credentials, firestore
 from google.api_core.exceptions import AlreadyExists, FailedPrecondition
 from google.cloud.firestore_v1.base_query import FieldFilter
 
+# rules is pure (no local imports), so this cannot cycle back into the ledger.
+import rules
+
 log = logging.getLogger("zillow-instant.ledger")
 
 _DB = None
@@ -434,8 +437,7 @@ def street_key(address: str) -> str:
     after the first comma, lowercase alphanumerics. '1294 E Apricot Ln, Gilbert,
     AZ 85298' and '1294 E Apricot Ln, Gilbert, AZ, 85298' collapse to the same
     key; '1294 E Apricot' does NOT match it (no substring matching)."""
-    head = (address or "").split(",")[0]
-    return re.sub(r"[^a-z0-9]", "", head.lower())
+    return re.sub(r"[^a-z0-9]", "", rules.street_line(address).lower())
 
 
 def first_name_key(name: str) -> str:
