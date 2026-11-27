@@ -278,7 +278,13 @@ def validate_slot(start_az: datetime, address: str, events: list,
         conflict = _agent_conflict(who, address, start_az, day_events)
         if not conflict:
             cover = None if who["email"] == order[0]["email"] else first_conflict
-            return {"ok": True, "agent": who, "same_day": same_day,
+            # EVERY showing is assigned to Alex (2026-11-27: "let's just
+            # assign them all to me and then I'll delegate"). The ladder only
+            # decides whether the time is bookable; Jace or Rhett being free
+            # means the team can cover it, and Alex hands it off himself.
+            # A thread-level override ('have Jace cover') still names that agent.
+            booked_as = agent if agent["email"] != rules.ALEX["email"] else rules.ALEX
+            return {"ok": True, "agent": booked_as, "same_day": same_day,
                     "jace_cover": cover}
         first_conflict = first_conflict or conflict
     return {"ok": False, "reason": first_conflict, "fold": None}

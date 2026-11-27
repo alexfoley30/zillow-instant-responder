@@ -101,16 +101,19 @@ def _showing(agent, start, end, where="2118 S El Marino, Mesa, AZ 85202"):
     return ev
 
 
-def test_renter_time_alex_busy_books_jace():
+# 2026-11-27 (Alex: "let's just assign them all to me and then I'll delegate"):
+# the ladder still decides whether a renter's time is bookable, but the
+# showing is always booked on Alex; jace_cover says he is double-booked.
+def test_renter_time_alex_busy_books_on_alex_flagged():
     v = cal.validate_slot(WED_530, ADDR, [CHEER], now_az=NOW, allow_cover=True)
-    assert v["ok"] and v["agent"] == rules.JACE and v["jace_cover"] == "alex-busy"
+    assert v["ok"] and v["agent"] == rules.ALEX and v["jace_cover"] == "alex-busy"
 
 
-def test_alex_and_jace_busy_books_rhett():
+def test_alex_and_jace_busy_still_books_on_alex():
     jace = _showing(rules.JACE, datetime(2026, 10, 28, 17, 15, tzinfo=AZ),
                     datetime(2026, 10, 28, 17, 45, tzinfo=AZ))
     v = cal.validate_slot(WED_530, ADDR, [CHEER, jace], now_az=NOW, allow_cover=True)
-    assert v["ok"] and v["agent"] == rules.RHETT and v["jace_cover"] == "alex-busy"
+    assert v["ok"] and v["agent"] == rules.ALEX and v["jace_cover"] == "alex-busy"
 
 
 def test_all_three_busy_counters():
@@ -129,25 +132,25 @@ def test_jace_showing_does_not_block_alex():
     assert v["ok"] and v["agent"] == rules.ALEX and v["jace_cover"] is None
 
 
-def test_renter_time_drive_gap_books_jace():
+def test_renter_time_drive_gap_books_on_alex_flagged():
     start = datetime(2026, 10, 27, 11, 0, tzinfo=AZ)
     other = _ev("Walkthrough", datetime(2026, 10, 27, 10, 0, tzinfo=AZ),
                 datetime(2026, 10, 27, 10, 45, tzinfo=AZ),
                 location="4627 E Night Glow Dr, Cave Creek, AZ 85331")
     v = cal.validate_slot(start, ADDR, [other], now_az=NOW, allow_cover=True)
-    assert v["ok"] and v["agent"] == rules.JACE and v["jace_cover"] == "drive-gap"
+    assert v["ok"] and v["agent"] == rules.ALEX and v["jace_cover"] == "drive-gap"
 
 
-def test_alex_away_jace_covers_then_rhett_when_jace_away_too():
+def test_alex_away_still_books_on_alex_while_team_can_cover():
     start = datetime(2026, 10, 27, 11, 0, tzinfo=AZ)
     away = {"summary": "Out of town", "start": {"date": "2026-10-27"},
             "end": {"date": "2026-10-28"}}
     v = cal.validate_slot(start, ADDR, [away], now_az=NOW, allow_cover=True)
-    assert v["ok"] and v["agent"] == rules.JACE
+    assert v["ok"] and v["agent"] == rules.ALEX and v["jace_cover"]
     jace_away = {"summary": "Jace out of town", "start": {"date": "2026-10-27"},
                  "end": {"date": "2026-10-28"}}
     v = cal.validate_slot(start, ADDR, [away, jace_away], now_az=NOW, allow_cover=True)
-    assert v["ok"] and v["agent"] == rules.RHETT
+    assert v["ok"] and v["agent"] == rules.ALEX and v["jace_cover"]
 
 
 def test_counters_stay_alex_only():
@@ -159,3 +162,20 @@ def test_invalid_renter_time_still_counters():
     start = datetime(2026, 10, 26, 10, 30, tzinfo=AZ)  # 90 min notice
     v = cal.validate_slot(start, ADDR, [], now_az=NOW, allow_cover=True)
     assert not v["ok"] and v["reason"] == "too-soon"
+
+
+def test_thread_override_still_names_that_agent():
+    # A hand-given 'have Jace cover' on a thread still books Jace.
+    v = cal.validate_slot(WED_530, ADDR, [], now_az=NOW, allow_cover=True)
+    assert v["agent"] == rules.ALEX
+    assert rules.pick_agent(WED_530, NOW, "jace") == rules.JACE
+
+
+def test_double_booked_fyi_goes_to_alert_email(monkeypatch):
+    import responder
+    sent = []
+    monkeypatch.setattr(responder.gm, "alert_email",
+                        lambda s, b: sent.append((s, b)) or True)
+    assert responder._booked_fyi("Booked, you're double-booked: Sam at 2118 S El Marino")
+    assert sent and sent[0][0].startswith("Booked, you're double-booked")
+    assert "Delegate" in sent[0][1]
