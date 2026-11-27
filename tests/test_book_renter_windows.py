@@ -101,6 +101,9 @@ def _wire(monkeypatch, now, cls_by_text, events=(), reviews=(), msgs=()):
     monkeypatch.setattr(responder.gm, "modify_labels", lambda *a, **k: None)
     monkeypatch.setattr(responder.gm, "poke_ping",
                         lambda m: calls["pings"].append(m) or True)
+    # Booked FYIs go out as alert emails since Poke retired (2026-11-27).
+    monkeypatch.setattr(responder.gm, "alert_email",
+                        lambda s, b: calls["pings"].append(s) or True)
     monkeypatch.setattr(responder.gm, "fetch_thread", lambda t: list(msgs))
     monkeypatch.setattr(responder.gm, "relay_from_thread", lambda m: RELAY)
     monkeypatch.setattr(responder.gm, "thread_transcript", lambda m: "")

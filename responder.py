@@ -920,7 +920,7 @@ def book_accepted_offer(thread_id, doc, first_name, address, relay, message_id) 
                       booked_start_iso=existing["start_az"].isoformat(),
                       agent=agent_name)
     try:
-        gm.poke_ping(f"Booked (added to existing showing): {first_name} - "
+        _booked_fyi(f"Booked (added to existing showing): {first_name} - "
                      f"{address.split(',')[0]} - {existing['when_human']}. [FYI]")
     except Exception as e:  # noqa: BLE001
         log.error("fold FYI ping failed: %s", e)
@@ -1516,7 +1516,7 @@ def _book_valid_slot(thread_id, doc, first_name, address, relay, start_az, v,
                                               [AWAITING_LABEL])
                     log.error("label failed after snap fold: %s", e)
                 try:
-                    gm.poke_ping(
+                    _booked_fyi(
                         f"Booked (joined existing): {first_name} - "
                         f"{address.split(',')[0]} - {near['when_human']}. [FYI]")
                 except Exception as e:  # noqa: BLE001
@@ -1541,11 +1541,11 @@ def _book_valid_slot(thread_id, doc, first_name, address, relay, start_az, v,
     jace_cover = v.get("jace_cover")
     when_human = cal.fmt_showing_time(start_az)
     jace_ping = None
-    if same_day or jace_cover:
-        reason = ("Alex busy" if jace_cover else "same-day")
-        jace_ping = (f"{agent['name'].split()[0]} assigned: {first_name} at {address.split(',')[0]} "
-                     f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} - {reason}. "
-                     "Conflict? Reply fast.")
+    if jace_cover:
+        # Booked on Alex though he has something then: he delegates it
+        # (2026-11-27, "assign them all to me and then I'll delegate").
+        jace_ping = (f"Booked, you're double-booked: {first_name} at {address.split(',')[0]} "
+                     f"{start_az.strftime('%a %-m/%-d %-I:%M %p')}. Hand it to Jace or Rhett.")
 
     if dry_run():
         ledger.write_shadow(thread_id, f"booked__pending_{message_id}", {
@@ -1602,13 +1602,21 @@ def _book_valid_slot(thread_id, doc, first_name, address, relay, start_az, v,
     # assignments; regular bookings reached the calendar but never his
     # phone). Cover bookings keep the urgent reply-fast copy.
     try:
-        gm.poke_ping(jace_ping or (
+        _booked_fyi(jace_ping or (
             f"Booked: {first_name} - {address.split(',')[0]} - "
             f"{start_az.strftime('%a %-m/%-d %-I:%M %p')} with "
             f"{agent['name'].split()[0]}. [FYI]"))
     except Exception as e:  # noqa: BLE001
         log.error("booked FYI ping failed: %s", e)
     return "sent"
+
+
+def _booked_fyi(msg: str) -> bool:
+    """Booked-showing FYI to Alex. Poke is retired (2026-11-25), so it goes
+    out as an alert email; the Mac's zillow_alert_relay texts every
+    zillow/alerts-log email to his phone within 2 minutes (2026-11-27)."""
+    return bool(gm.alert_email(msg, msg + "\n\nIt is on your calendar. "
+                               "Delegate from the invite if you can't make it."))
 
 
 def handle_cancellation(thread_id, doc, first_name, relay, message_id,
